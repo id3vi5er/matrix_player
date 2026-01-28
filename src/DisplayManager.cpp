@@ -1,22 +1,33 @@
 #include "DisplayManager.h"
 
 MatrixPanel_I2S_DMA* DisplayManager::dma = nullptr;
+std::set<void*> DisplayManager::validFiles;
 
 // --- Callbacks for AnimatedGIF ---
 void* DisplayManager::GIFOpenFile(const char *fname, int32_t *pSize) {
     File f = LittleFS.open(fname);
     if (f) {
         *pSize = f.size();
-        return (void*)new File(f);
+        File* fPtr = new File(f);
+        validFiles.insert((void*)fPtr);
+        Serial.printf("GIFOpen: %s -> %p\n", fname, fPtr);
+        return (void*)fPtr;
     }
+    Serial.printf("GIFOpen FAILED: %s\n", fname);
     return NULL;
 }
 
 void DisplayManager::GIFCloseFile(void *pHandle) {
-    File *f = static_cast<File*>(pHandle);
-    if (f) {
+    if (!pHandle) return;
+    
+    if (validFiles.find(pHandle) != validFiles.end()) {
+        File *f = static_cast<File*>(pHandle);
+        Serial.printf("GIFClose: %p\n", f);
         f->close();
         delete f;
+        validFiles.erase(pHandle);
+    } else {
+        Serial.printf("GIFClose: Ignored invalid/double-free handle %p\n", pHandle);
     }
 }
 
@@ -196,9 +207,29 @@ void DisplayManager::stop() {
     cmdPending = true;
 }
 
+void DisplayManager::forceStop() {
+    // Synchronously stop everything to release file handles immediately
+    // We lock the cmdMutex to ensure the loop doesn't try to draw while we close
+    std::lock_guard<std::mutex> lk(cmdMutex);
+    std::lock_guard<std::mutex> gifLk(gifMutex);
+    
+    // Reset state
+    isStreaming = false;
+    isPlaying = false;
+    isTextMode = false;
+    
+    // Close file immediately
+    gif.close();
+    
+    // We don't clear screen here to avoid delaying the network response, 
+    // but we ensure the file handle is free.
+    Serial.println("DisplayManager: Force Stopped.");
+}
+
 // --- Internal Logic (Main Loop Context) ---
 
 void DisplayManager::_playFile(const String& path) {
+    std::lock_guard<std::mutex> gifLk(gifMutex);
     isStreaming = false;
     isTextMode = false;
     singleMode = true;
@@ -221,13 +252,16 @@ void DisplayManager::_playFile(const String& path) {
              nextGifFrameTime = millis();
         }
 
-        if (onFileChange) onFileChange(path);
+        pendingFileNotification = path; // Schedule callback
     } else {
         Serial.println("Failed to open GIF");
     }
 }
 
 void DisplayManager::_playAll(const String& playlistName) {
+    // Lock before accessing shared state or calling loadNextInPlaylist
+    std::lock_guard<std::mutex> gifLk(gifMutex);
+
     isStreaming = false;
     isTextMode = false;
     singleMode = false;
@@ -244,6 +278,7 @@ void DisplayManager::_playAll(const String& playlistName) {
 }
 
 void DisplayManager::_stop() {
+    std::lock_guard<std::mutex> gifLk(gifMutex);
     isStreaming = false;
     isPlaying = false;
     isTextMode = false;
@@ -263,6 +298,8 @@ void DisplayManager::loadNextInPlaylist() {
     }
     
     currentFile = playlist[playlistIndex];
+    
+    // std::lock_guard<std::mutex> gifLk(gifMutex); // Caller must hold lock!
     gif.close();
     // dma->clearScreen(); // Removed
     
@@ -281,7 +318,7 @@ void DisplayManager::loadNextInPlaylist() {
              nextGifFrameTime = millis();
         }
 
-        if (onFileChange) onFileChange(currentFile);
+        pendingFileNotification = currentFile; // Schedule callback
     } else {
         Serial.printf("Skipping broken GIF: %s\n", currentFile.c_str());
     }
@@ -423,6 +460,9 @@ void DisplayManager::loop() {
     else if (isPlaying && !isStreaming) {
         
         if (millis() >= nextGifFrameTime) {
+            std::lock_guard<std::mutex> gifLk(gifMutex);
+            if (!isPlaying) return; // Check again after lock
+
             int tDelay = 0;
             int result = gif.playFrame(false, &tDelay); // Decode frame, get delay
             
@@ -455,5 +495,25 @@ void DisplayManager::loop() {
             }
         }
         yield(); 
+    }
+
+    // 4. Handle Notification (Outside Mutex to avoid deadlock with Network Task)
+    String notifyPath = "";
+    {
+        // We can peek/clear it safely. Since string copy is cheap.
+        // Actually, we need to protect access to pendingFileNotification string?
+        // It's modified under gifMutex/cmdMutex context?
+        // _playFile uses gifMutex. loadNextInPlaylist uses gifMutex (via caller).
+        // So it's protected by gifMutex.
+        // We should lock gifMutex to read it.
+        std::lock_guard<std::mutex> gifLk(gifMutex);
+        if (pendingFileNotification != "") {
+            notifyPath = pendingFileNotification;
+            pendingFileNotification = "";
+        }
+    }
+    
+    if (notifyPath != "" && onFileChange) {
+        onFileChange(notifyPath);
     }
 }

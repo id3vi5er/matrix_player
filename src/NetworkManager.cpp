@@ -105,8 +105,9 @@ void NetworkManager::begin() {
             if(uploadFile) {
                 uploadFile.close();
                 Serial.println("Upload End.");
-                // Notify clients to refresh list
-                ws.textAll("{\"cmd\":\"reload\"}");
+                // Do NOT notify clients automatically to prevent WDT crash during batch uploads
+                // The client is responsible for refreshing the list when done.
+                // ws.textAll("{\"cmd\":\"reload\"}");
             }
         }
     });
@@ -138,11 +139,47 @@ void NetworkManager::begin() {
     ArduinoOTA.begin();
 
     server.begin();
+    
+    lastWifiCheckTime = millis();
 }
 
 void NetworkManager::loop() {
     ws.cleanupClients();
     ArduinoOTA.handle();
+    
+    // Check WiFi Status periodically
+    if (millis() - lastWifiCheckTime > WIFI_CHECK_INTERVAL) {
+        lastWifiCheckTime = millis();
+        if (WiFi.status() != WL_CONNECTED) {
+            Serial.println("WiFi Connection Lost. Retrying...");
+            WiFi.disconnect();
+            WiFi.begin(WIFI_SSID, WIFI_PASS);
+            
+            unsigned long startAttempt = millis();
+            // Retry for 10 seconds, but keep display running
+            while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 10000) {
+                if (display) display->loop();
+                delay(10);
+            }
+            
+            if (WiFi.status() == WL_CONNECTED) {
+                Serial.println("WiFi Reconnected!");
+                Serial.println("IP: " + WiFi.localIP().toString());
+            } else {
+                Serial.println("WiFi Reconnect Failed. Will try again later.");
+            }
+        }
+    }
+    
+    if (shouldSendList) {
+        shouldSendList = false;
+        if (pendingListClientId != 0) {
+            AsyncWebSocketClient* client = ws.client(pendingListClientId);
+            if (client) {
+                sendList(client);
+            }
+        }
+    }
 }
 
 void NetworkManager::onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
@@ -215,13 +252,15 @@ void NetworkManager::handleJson(AsyncWebSocketClient *client, uint8_t *data, siz
     }
     else if (cmd == "set_playlist") {
         display->setPlaylist(doc["name"]);
-        sendList(client);
+        pendingListClientId = client->id();
+        shouldSendList = true;
     }
     else if (cmd == "stop") {
         display->stop();
     }
     else if (cmd == "list") {
-        sendList(client);
+        pendingListClientId = client->id();
+        shouldSendList = true;
     }
     else if (cmd == "delete") {
         String file = doc["file"];
@@ -229,7 +268,7 @@ void NetworkManager::handleJson(AsyncWebSocketClient *client, uint8_t *data, siz
         
         // Stop display if the file to be deleted is currently playing
         if (display->getCurrentFile() == file) {
-            display->stop();
+            display->forceStop();
         }
         
         if (fileMgr->removeFile(file)) {
@@ -237,48 +276,80 @@ void NetworkManager::handleJson(AsyncWebSocketClient *client, uint8_t *data, siz
         } else {
             Serial.println("Delete FAILED");
         }
-        sendList(client); 
+        pendingListClientId = client->id();
+        shouldSendList = true; 
     }
     else if (cmd == "delete_playlist") {
         String pl = doc["name"];
         Serial.printf("Delete Playlist Request: %s\n", pl.c_str());
         
-        // Stop if currently playing from this playlist
-        // Simple check: if current playlist name matches
-        // Note: DisplayManager logic might need a check, but stopping generic is safer
-        display->stop();
+        // Force stop to release any open file handles
+        display->forceStop();
+        delay(50); // Allow FS to sync
 
         if (fileMgr->removePlaylist(pl)) {
             Serial.println("Playlist Delete Success");
         } else {
             Serial.println("Playlist Delete FAILED");
         }
-        sendList(client);
+        pendingListClientId = client->id();
+        shouldSendList = true;
     }
     
     delete docPtr;
 }
 
 void NetworkManager::sendList(AsyncWebSocketClient *client) {
-    std::vector<String> files = fileMgr->listGifs();
-    std::vector<String> playlists = fileMgr->listPlaylists();
-    
-    // Increase buffer size to handle many files (32KB should be enough for hundreds of files)
-    DynamicJsonDocument doc(32768); 
-    doc["cmd"] = "list";
-    
+    // 1. Send Start + Playlists + Stats
+    DynamicJsonDocument doc(2048);
+    doc["cmd"] = "list_start";
     doc["total"] = fileMgr->getTotalSpace();
     doc["used"] = fileMgr->getUsedSpace();
 
-    JsonArray fileArr = doc.createNestedArray("files");
-    for (const auto& f : files) fileArr.add(f);
-
     JsonArray playlistArr = doc.createNestedArray("playlists");
+    std::vector<String> playlists = fileMgr->listPlaylists();
     for (const auto& p : playlists) playlistArr.add(p);
     
     String output;
     serializeJson(doc, output);
     client->text(output);
+
+    // 2. Stream Files using Callback
+    const size_t CHUNK_SIZE = 50; 
+    std::vector<String> buffer;
+    buffer.reserve(CHUNK_SIZE);
+
+    // Pass "ALL" (or empty string if logic was adapted) to start recursively from root
+    fileMgr->listGifs("ALL", [&](const String& file){
+        buffer.push_back(file);
+        if (buffer.size() >= CHUNK_SIZE) {
+            DynamicJsonDocument chunkDoc(4096);
+            chunkDoc["cmd"] = "list_chunk";
+            JsonArray fileArr = chunkDoc.createNestedArray("files");
+            for(const auto& f : buffer) fileArr.add(f);
+            
+            String chunkOut;
+            serializeJson(chunkDoc, chunkOut);
+            client->text(chunkOut);
+            buffer.clear();
+            delay(5); // Yield to keep network stable
+        }
+    });
+
+    // Send remaining files
+    if (!buffer.empty()) {
+        DynamicJsonDocument chunkDoc(4096);
+        chunkDoc["cmd"] = "list_chunk";
+        JsonArray fileArr = chunkDoc.createNestedArray("files");
+        for(const auto& f : buffer) fileArr.add(f);
+        
+        String chunkOut;
+        serializeJson(chunkDoc, chunkOut);
+        client->text(chunkOut);
+    }
+
+    // 3. Send End Signal
+    client->text("{\"cmd\":\"list_end\"}");
 }
 
 void NetworkManager::broadcastStatus(const String& filename) {

@@ -6,9 +6,9 @@ bool FileManager::begin() {
 }
 
 void FileManager::createTestGifIfEmpty() {
-    std::vector<String> gifs = listGifs();
-    if (gifs.empty()) {
-        Serial.println("FileManager: No GIFs found. Creating 'test.gif'...");
+    // Optimization: Don't scan all files. Just check if the test file exists.
+    if (!LittleFS.exists("/Default/test.gif")) {
+        Serial.println("FileManager: test.gif missing. Creating...");
         // Ensure /Default directory exists
         if (!LittleFS.exists("/Default")) LittleFS.mkdir("/Default");
         File f = LittleFS.open("/Default/test.gif", "w");
@@ -59,6 +59,7 @@ std::vector<String> FileManager::listGifs(const String& playlist) {
             }
         }
         file = root.openNextFile();
+        delay(1); // Yield to prevent WDT timeout during large directory listing
     }
     
     // Cleanup: If we have multiple files and the default test.gif is in there, remove it
@@ -72,6 +73,43 @@ std::vector<String> FileManager::listGifs(const String& playlist) {
         }
     }
     return files;
+}
+
+void FileManager::listGifs(const String& playlist, std::function<void(const String&)> callback) {
+    String folderPath = playlist;
+    
+    bool recursive = (playlist == "" || playlist == "ALL");
+    if (recursive) folderPath = "/";
+    if (!folderPath.startsWith("/")) folderPath = "/" + folderPath;
+
+    File root = LittleFS.open(folderPath);
+    if (!root || !root.isDirectory()) return;
+
+    File file = root.openNextFile();
+    while (file) {
+        String name = String(file.name());
+        String fullPath;
+        if (name.startsWith("/")) {
+            fullPath = name;
+        } else {
+            fullPath = folderPath;
+            if (!fullPath.endsWith("/")) fullPath += "/";
+            fullPath += name;
+        }
+        fullPath.replace("//", "/");
+
+        if (file.isDirectory()) {
+            if (recursive) {
+                listGifs(fullPath, callback);
+            }
+        } else {
+            if (fullPath.endsWith(".gif") || fullPath.endsWith(".GIF")) {
+                callback(fullPath);
+            }
+        }
+        file = root.openNextFile();
+        delay(1); // Yield
+    }
 }
 
 std::vector<String> FileManager::listPlaylists() {
@@ -134,6 +172,8 @@ bool FileManager::removePlaylist(const String& playlist) {
 
     if (!LittleFS.exists(folder)) return false;
 
+    // Step 1: Collect all files to delete (avoid deleting while iterating)
+    std::vector<String> filesToDelete;
     File root = LittleFS.open(folder);
     if (!root || !root.isDirectory()) return false;
 
@@ -150,13 +190,22 @@ bool FileManager::removePlaylist(const String& playlist) {
         fullPath.replace("//", "/");
 
         if (!file.isDirectory()) {
-            Serial.printf("FileManager: Deleting content %s\n", fullPath.c_str());
-            LittleFS.remove(fullPath);
+            filesToDelete.push_back(fullPath);
         }
         file = root.openNextFile();
     }
-    root.close(); // Close before rmdir
+    root.close(); // Close directory handle
 
+    // Step 2: Delete collected files
+    for (const auto& fPath : filesToDelete) {
+        Serial.printf("FileManager: Deleting content %s\n", fPath.c_str());
+        if (!LittleFS.remove(fPath)) {
+             Serial.printf("FileManager: Failed to remove %s\n", fPath.c_str());
+        }
+        delay(1); // Yield to prevent WDT timeout during bulk deletion
+    }
+
+    // Step 3: Remove empty directory
     if (LittleFS.rmdir(folder)) {
         Serial.printf("FileManager: Playlist folder %s deleted.\n", folder.c_str());
         return true;

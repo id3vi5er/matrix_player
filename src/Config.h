@@ -27,7 +27,7 @@
 #define PANEL_CHAIN 1
 
 // --- Defaults ---
-#define DEFAULT_BRIGHTNESS 100
-#define DEFAULT_LOOP_DURATION 5000 // ms
+#define DEFAULT_BRIGHTNESS 150
+#define DEFAULT_LOOP_DURATION 600000 // ms
 #define DEFAULT_ROTATION 1 // 0-3 (0°, 90°, 180°, 270°)
 

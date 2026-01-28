@@ -3,12 +3,16 @@
 #include "DisplayManager.h"
 #include "NetworkManager.h"
 #include "FileManager.h"
+#include <esp_task_wdt.h>
 
 DisplayManager displayMgr;
 FileManager fileMgr;
 NetworkManager netMgr(&displayMgr, &fileMgr);
 
 void setup() {
+    // Increase WDT timeout to 30 seconds to handle large file operations
+    esp_task_wdt_init(30, true);
+    
     Serial.begin(115200);
     delay(2000); 
     Serial.println("\n--- BOOT ---");

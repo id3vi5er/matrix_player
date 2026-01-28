@@ -13,7 +13,7 @@ This project is a complete ecosystem for controlling a **64x64 HUB75 RGB LED Mat
 *   **LittleFS:** Efficient file management on the 16MB Flash memory.
 
 ### Desktop Client (Python & PyQt6)
-*   **Smart Auto-Converter:** Drag & drop PNG, JPG, BMP, or GIFs. The client automatically resizes, crops, and converts them into optimized 64x64 GIFs before uploading.
+*   **Smart Auto-Converter:** Drag & drop PNG, JPG, BMP, or GIFs. The client automatically resizes, crops, and converts them into opwtimized 64x64 GIFs before uploading.
 *   **Live Stream Mode:** Stream your PC monitor or specific windows directly to the matrix in real-time.
 *   **Remote Management:** List files, delete images, or **delete entire playlists** directly from the UI.
 *   **Real-Time Control:** Adjust brightness, rotation, playback speed (up to 24h per image), and toggle shuffle mode instantly via WebSocket.

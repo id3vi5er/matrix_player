@@ -7,6 +7,8 @@
 #include "Config.h"
 #include "FileManager.h"
 
+#include <set>
+
 class DisplayManager {
 public:
     typedef std::function<void(String)> FileChangeCallback;
@@ -25,6 +27,7 @@ public:
     void playFile(const String& path); // Single Mode
     void playAll(const String& playlist = ""); // Loop Mode (reloads file list)
     void stop();
+    void forceStop(); // Synchronous stop for deletion
     
     String getCurrentFile() { return currentFile; }
 
@@ -35,14 +38,16 @@ public:
     // Text
     void showText(const String& text, bool scroll = false);
     void setTextColor(uint8_t r, uint8_t g, uint8_t b);
-
+    
     // Static Access for C-Callbacks
     static MatrixPanel_I2S_DMA* dma;
+    static std::set<void*> validFiles; // Track open file handles for safety
 
 private:
     FileManager* fileMgr;
     AnimatedGIF gif;
     std::mutex cmdMutex;
+    std::mutex gifMutex; // Protects AnimatedGIF object
     
     // Text State
     bool isTextMode = false;
@@ -78,6 +83,7 @@ private:
     String currentPlaylist = "ALL";
     int playlistIndex = 0;
     String currentFile;
+    String pendingFileNotification = ""; // For thread-safe callbacks
     FileChangeCallback onFileChange = nullptr;
     
     // Timing

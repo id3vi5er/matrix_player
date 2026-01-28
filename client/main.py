@@ -16,7 +16,7 @@ from PyQt6.QtWebSockets import QWebSocket
 from PyQt6.QtNetwork import QAbstractSocket, QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
 # --- Config ---
-DEFAULT_IP = "192.168.1.123"
+DEFAULT_IP = "192.168.178.155"
 
 # --- Stylesheet (Modern Dark) ---
 STYLESHEET = """
@@ -489,6 +489,7 @@ class MatrixApp(QMainWindow):
         self.image_cache = {} # filename -> QPixmap
         self.current_remote_file = ""
         self.all_files = [] # Store raw list from server
+        self.temp_file_buffer = [] # Buffer for chunked loading
 
         # Timers
         self.stream_timer = QTimer()
@@ -826,9 +827,10 @@ class MatrixApp(QMainWindow):
             data = json.loads(msg)
             cmd = data.get('cmd')
             
-            if cmd == 'list':
-                # Store raw files
-                self.all_files = data.get('files', [])
+            if cmd == 'list_start':
+                # Start of new list
+                self.all_files = []
+                self.file_list.clear()
                 
                 # Update Playlists
                 playlists = data.get('playlists', [])
@@ -840,9 +842,6 @@ class MatrixApp(QMainWindow):
                     self.playlist_combo.setCurrentText(current_p)
                 self.playlist_combo.blockSignals(False)
 
-                # Update View
-                self.update_file_list_view()
-
                 # Update Storage Bar
                 total = data.get('total', 0)
                 used = data.get('used', 0)
@@ -850,6 +849,18 @@ class MatrixApp(QMainWindow):
                     self.storage_bar.setMaximum(total)
                     self.storage_bar.setValue(used)
                     self.storage_bar.setFormat(f"{used/(1024*1024):.1f} / {total/(1024*1024):.1f} MB")
+
+            elif cmd == 'list_chunk':
+                chunk = data.get('files', [])
+                self.all_files.extend(chunk)
+                self.add_files_to_view(chunk)
+
+            elif cmd == 'list_end' or cmd == 'list': # Handle legacy 'list' just in case
+                if cmd == 'list':
+                    self.all_files = data.get('files', [])
+                    self.update_file_list_view()
+                
+                self.status_lbl.setText(f"Loaded {len(self.all_files)} files.")
             
             elif cmd == 'reload':
                 self.send_cmd("list")
@@ -862,21 +873,13 @@ class MatrixApp(QMainWindow):
             print(f"WS Text Error: {e} | Msg: {msg}")
 
     def on_playlist_changed(self, name):
-        self.send_cmd("set_playlist", {"name": name})
+        # Only update the local view, do NOT start playback on device automatically
+        # self.send_cmd("set_playlist", {"name": name}) 
         self.update_file_list_view()
 
-    def update_file_list_view(self):
+    def add_files_to_view(self, files):
         selected_playlist = self.playlist_combo.currentText()
-        self.file_list.clear()
-        
-        # Update Button Text
-        if selected_playlist == "ALL":
-            self.play_all_btn.setText("Loop All Files")
-        else:
-            self.play_all_btn.setText(f"Loop '{selected_playlist}'")
-
-        # Filter Files
-        for f in self.all_files:
+        for f in files:
             if not f: continue
             # Normalize path check
             if selected_playlist == "ALL":
@@ -889,6 +892,18 @@ class MatrixApp(QMainWindow):
                 
                 if check.startswith(folder_sig):
                     self.file_list.addItem(f)
+
+    def update_file_list_view(self):
+        selected_playlist = self.playlist_combo.currentText()
+        self.file_list.clear()
+        
+        # Update Button Text
+        if selected_playlist == "ALL":
+            self.play_all_btn.setText("Loop All Files")
+        else:
+            self.play_all_btn.setText(f"Loop '{selected_playlist}'")
+
+        self.add_files_to_view(self.all_files)
 
     def on_ws_binary(self, data):
         # 0x4B is 'K'
