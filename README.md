@@ -19,6 +19,12 @@ This project is a complete ecosystem for controlling a **64x64 HUB75 RGB LED Mat
 *   **Real-Time Control:** Adjust brightness, rotation, playback speed (up to 24h per image), and toggle shuffle mode instantly via WebSocket.
 *   **Text Mode:** Send scrolling text messages with custom colors.
 
+### Home Automation (MQTT)
+*   **Home Assistant Integration:** Fully controllable via MQTT.
+*   **Auto-Discovery:** Automatically creates entities in Home Assistant for brightness, power, and playlist selection.
+*   **Remote Control:** Change playlists, loop specific files, or adjust brightness remotely.
+*   **Status Updates:** Reports current file, playlist, and device status in real-time.
+
 ## 🛠 Hardware Setup
 
 ### Components
@@ -47,7 +53,8 @@ Configured in `src/Config.h`. Matches standard libraries for ESP32-S3:
 1.  Open the project folder in VS Code with **PlatformIO**.
 2.  **Configuration:**
     *   Rename `src/Secrets_example.h` to `src/Secrets.h`.
-    *   Enter your WiFi credentials in `src/Secrets.h`.
+    *   Enter your WiFi and **MQTT credentials** in `src/Secrets.h`.
+    *   (Optional) Adjust MQTT topics in `src/Config.h`.
 3.  Connect your ESP32-S3 via USB.
 4.  Click **PlatformIO: Upload** to flash the firmware.
 5.  (Optional) Click **Upload Filesystem Image** to initialize LittleFS (wipes existing files).
