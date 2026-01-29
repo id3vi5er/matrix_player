@@ -162,7 +162,19 @@ void DisplayManager::showText(const String& text, bool scroll) {
 }
 
 void DisplayManager::setTextColor(uint8_t r, uint8_t g, uint8_t b) {
-    if (dma) textColor = dma->color565(r, g, b);
+    std::lock_guard<std::mutex> lk(cmdMutex);
+    pendingCmd = CMD_SET_TEXT_COLOR;
+    pendingR = r;
+    pendingG = g;
+    pendingB = b;
+    cmdPending = true;
+}
+
+void DisplayManager::setTextSize(uint8_t size) {
+    std::lock_guard<std::mutex> lk(cmdMutex);
+    pendingCmd = CMD_SET_FONT_SIZE;
+    pendingInt = size;
+    cmdPending = true;
 }
 
 // Handling fragmented WebSocket frames safely
@@ -259,7 +271,6 @@ void DisplayManager::_playFile(const String& path) {
 }
 
 void DisplayManager::_playAll(const String& playlistName) {
-    // Lock before accessing shared state or calling loadNextInPlaylist
     std::lock_guard<std::mutex> gifLk(gifMutex);
 
     isStreaming = false;
@@ -267,12 +278,63 @@ void DisplayManager::_playAll(const String& playlistName) {
     singleMode = false;
     if (playlistName != "") currentPlaylist = playlistName;
     
-    playlist = fileMgr->listGifs(currentPlaylist);
-    if (playlist.empty()) {
+    // 1. Build Meta-Playlist (List of Folders)
+    metaPlaylist.clear();
+    
+    if (currentPlaylist == "ALL") {
+        std::vector<String> all = fileMgr->listPlaylists();
+        for(const auto& p : all) {
+            // Filter system folders and "ALL" keyword
+            if(p != "ALL" && p != "System Volume Information") {
+                metaPlaylist.push_back(p);
+            }
+        }
+        
+        // Shuffle Folders
+        if (isShuffle && metaPlaylist.size() > 1) {
+             for (int i = 0; i < metaPlaylist.size(); i++) {
+                 int r = random(i, metaPlaylist.size());
+                 std::swap(metaPlaylist[i], metaPlaylist[r]);
+             }
+        }
+    } else {
+        // Single Folder Mode
+        metaPlaylist.push_back(currentPlaylist);
+    }
+    
+    if (metaPlaylist.empty()) {
         _stop();
-        Serial.println("No GIFs found in playlist " + currentPlaylist);
+        Serial.println("No playlists found.");
         return;
     }
+    
+    metaPlaylistIndex = 0;
+    loadPlaylistFolder(metaPlaylist[0]);
+}
+
+void DisplayManager::loadPlaylistFolder(const String& folder) {
+    // Note: Called from _playAll or loadNextInPlaylist, so gifMutex is already locked (or should be)
+    // However, listGifs interacts with FS, which is slow but safe.
+    
+    Serial.printf("Loading Playlist Folder: %s\n", folder.c_str());
+    playlist = fileMgr->listGifs(folder);
+    
+    if (playlist.empty()) {
+        Serial.println("Empty folder, skipping...");
+        // Handle empty folder by forcing next immediately? 
+        // We'll let loadNextInPlaylist handle empty logic if possible, or just recurse.
+        // For safety, just stop if *everything* is empty, but here we just return.
+        // loadNextInPlaylist will see empty playlist and try to move on.
+    } else {
+        // Shuffle Files
+        if (isShuffle && playlist.size() > 1) {
+            for (int i = 0; i < playlist.size(); i++) {
+                int r = random(i, playlist.size());
+                std::swap(playlist[i], playlist[r]);
+            }
+        }
+    }
+    
     playlistIndex = -1; 
     loadNextInPlaylist();
 }
@@ -287,26 +349,45 @@ void DisplayManager::_stop() {
 }
 
 void DisplayManager::loadNextInPlaylist() {
-    if (playlist.empty()) return;
+    // 1. Check if we need to loop or change folder
+    playlistIndex++;
     
-    if (isShuffle) {
-        // Random index
-        playlistIndex = random(0, playlist.size());
-    } else {
-        playlistIndex++;
-        if (playlistIndex >= playlist.size()) playlistIndex = 0;
+    if (playlist.empty() || playlistIndex >= playlist.size()) {
+        // End of current folder
+        
+        if (metaPlaylist.size() > 1) {
+             // Move to next folder
+             metaPlaylistIndex++;
+             if (metaPlaylistIndex >= metaPlaylist.size()) {
+                 metaPlaylistIndex = 0; // Loop Meta Playlist
+                 // Reshuffle folders on loop? Optional.
+             }
+             loadPlaylistFolder(metaPlaylist[metaPlaylistIndex]);
+             return; // loadPlaylistFolder calls loadNextInPlaylist
+        } else {
+            // Single Folder Loop
+            playlistIndex = 0;
+            if (playlist.empty()) return; // Safety
+            
+            // Reshuffle for variation on repeat
+            if (isShuffle && playlist.size() > 1) {
+                for (int i = 0; i < playlist.size(); i++) {
+                    int r = random(i, playlist.size());
+                    std::swap(playlist[i], playlist[r]);
+                }
+            }
+        }
     }
     
     currentFile = playlist[playlistIndex];
     
     // std::lock_guard<std::mutex> gifLk(gifMutex); // Caller must hold lock!
     gif.close();
-    // dma->clearScreen(); // Removed
     
     if (gif.open(currentFile.c_str(), GIFOpenFile, GIFCloseFile, GIFReadFile, GIFSeekFile, GIFDraw)) {
         isPlaying = true;
         currentGifStartTime = millis();
-        Serial.printf("Playlist [%d/%d]: %s\n", playlistIndex+1, playlist.size(), currentFile.c_str());
+        Serial.printf("[%s] Playing: %s\n", metaPlaylist[metaPlaylistIndex].c_str(), currentFile.c_str());
         
         // Instant Start
         dma->clearScreen();
@@ -318,20 +399,71 @@ void DisplayManager::loadNextInPlaylist() {
              nextGifFrameTime = millis();
         }
 
-        pendingFileNotification = currentFile; // Schedule callback
+        pendingFileNotification = currentFile; 
     } else {
         Serial.printf("Skipping broken GIF: %s\n", currentFile.c_str());
+        loadNextInPlaylist(); // Recursive retry
     }
 }
 
 void DisplayManager::_showText(const String& text, bool scroll) {
-    _stop(); // Clears screen and flags
+    if (text == "") {
+        // --- Restore Previous State ---
+        if (isTextMode) {
+            isTextMode = false;
+            dma->clearScreen();
+            
+            Serial.println("DisplayManager: Text cleared. Restoring previous state...");
+            
+            if (savedIsPlaying) {
+                if (savedSingleMode) {
+                    _playFile(savedCurrentFile);
+                } else {
+                    // Restore playlist mode
+                    // We set the playlist back but we might want to continue where we left off?
+                    // For simplicity, we just restart the playlist or resume if we could.
+                    // _playAll resets everything. Let's try to be smart.
+                    
+                    // Restore internal flags
+                    singleMode = false;
+                    currentPlaylist = savedCurrentPlaylist;
+                    
+                    // We need to restart the GIF that was playing
+                    _playFile(savedCurrentFile); 
+                    
+                    // Important: _playFile sets singleMode=true. We must correct it back to false
+                    // so the loop logic knows to continue the playlist.
+                    singleMode = false; 
+                }
+            } else {
+                // Was stopped
+                _stop();
+            }
+        }
+        return;
+    }
+
+    // --- Enter Text Mode ---
+    
+    // Only save state if we are NOT already in text mode (to avoid overwriting backup with text mode state)
+    if (!isTextMode) {
+        Serial.println("DisplayManager: Saving state before showing text...");
+        savedIsPlaying = isPlaying;
+        savedSingleMode = singleMode;
+        savedCurrentFile = currentFile;
+        savedCurrentPlaylist = currentPlaylist;
+        
+        // Stop current animation without clearing variables we just saved
+        // _stop() clears isPlaying, so we saved it just in time.
+        _stop(); 
+    }
+
     isTextMode = true;
     textMessage = text;
     textScroll = scroll;
     
     // Setup Font
-    dma->setTextSize(1); // Standard 5x7
+    dma->setTextSize(textSize); // Standard 5x7 or scaled
     dma->setTextWrap(false); // Important for scrolling
     
     // Calculate Bounds
@@ -360,6 +492,7 @@ void DisplayManager::loop() {
     unsigned long valToExec = 0;
     int intToExec = 0;
     bool boolToExec = false;
+    uint8_t rExec, gExec, bExec;
     
     {
         std::lock_guard<std::mutex> lk(cmdMutex);
@@ -369,6 +502,7 @@ void DisplayManager::loop() {
             valToExec = pendingVal;
             intToExec = pendingInt;
             boolToExec = pendingBool;
+            rExec = pendingR; gExec = pendingG; bExec = pendingB;
             cmdPending = false;
             pendingCmd = CMD_NONE; 
         }
@@ -384,7 +518,8 @@ void DisplayManager::loop() {
                 loopDurationMs = valToExec; 
                 break;
             case CMD_SET_BRIGHTNESS:
-                if (dma) dma->setBrightness8((uint8_t)intToExec);
+                currentBrightness = (uint8_t)intToExec;
+                if (dma) dma->setBrightness8(currentBrightness);
                 break;
             case CMD_SET_ROTATION:
                 if (dma) {
@@ -406,6 +541,13 @@ void DisplayManager::loop() {
             case CMD_SET_SHUFFLE:
                 isShuffle = boolToExec;
                 Serial.printf("Shuffle Mode: %d\n", isShuffle);
+                break;
+            case CMD_SET_TEXT_COLOR:
+                if (dma) textColor = dma->color565(rExec, gExec, bExec);
+                break;
+            case CMD_SET_FONT_SIZE:
+                textSize = (uint8_t)intToExec;
+                if (textSize < 1) textSize = 1;
                 break;
             default: break;
         }

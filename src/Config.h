@@ -30,4 +30,10 @@
 #define DEFAULT_BRIGHTNESS 150
 #define DEFAULT_LOOP_DURATION 600000 // ms
 #define DEFAULT_ROTATION 1 // 0-3 (0°, 90°, 180°, 270°)
+#define DEFAULT_PLAYLIST "Pokemon_Overworld" // "ALL" for everything, or folder name e.g. "Party"
+#define DEFAULT_FONT_SIZE 1 // 1 = 5x7 px, 2 = 10x14 px, etc.
+
+// --- MQTT Settings ---
+#define MQTT_TOPIC_PREFIX "ledmatrix"
+#define MQTT_RECONNECT_INTERVAL 5000
 

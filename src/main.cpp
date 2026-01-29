@@ -1,53 +1,32 @@
-#include <Arduino.h>
-#include "Config.h"
-#include "DisplayManager.h"
 #include "NetworkManager.h"
-#include "FileManager.h"
-#include <esp_task_wdt.h>
+#include "MqttManager.h"
 
-DisplayManager displayMgr;
 FileManager fileMgr;
-NetworkManager netMgr(&displayMgr, &fileMgr);
+DisplayManager display;
+NetworkManager* network = nullptr;
+MqttManager* mqtt = nullptr;
 
 void setup() {
-    // Increase WDT timeout to 30 seconds to handle large file operations
-    esp_task_wdt_init(30, true);
-    
-    Serial.begin(115200);
-    delay(2000); 
-    Serial.println("\n--- BOOT ---");
+  Serial.begin(115200);
+  
+  if (!fileMgr.begin()) {
+    Serial.println("LittleFS Mount Failed");
+  }
+  fileMgr.createTestGifIfEmpty();
 
-    if (psramFound()) {
-        Serial.printf("PSRAM: %d bytes\n", ESP.getPsramSize());
-    } else {
-        Serial.println("ERR: PSRAM not found!");
-    }
+  display.begin(&fileMgr);
+  
+  network = new NetworkManager(&display, &fileMgr);
+  network->begin();
 
-    Serial.println("Initializing FileManager...");
-    if (!fileMgr.begin()) {
-        Serial.println("LittleFS Mount Failed");
-    }
-    
-    fileMgr.createTestGifIfEmpty();
+  mqtt = new MqttManager(&display, &fileMgr);
+  mqtt->begin();
 
-    Serial.println("Initializing NetworkManager...");
-    netMgr.begin();
-
-    Serial.println("Initializing DisplayManager...");
-    displayMgr.begin(&fileMgr);
-    
-    // Sync Display -> Network
-    displayMgr.setFileChangeCallback([](String f){
-        netMgr.broadcastStatus(f);
-    });
-    
-    Serial.println("Starting playback...");
-    displayMgr.playAll();
-    Serial.println("Setup complete.");
+  display.playAll(DEFAULT_PLAYLIST);
 }
 
 void loop() {
-    displayMgr.loop();
-    netMgr.loop();
-    delay(1); // Small delay to prevent CPU starvation of WiFi task
+  display.loop();
+  network->loop();
+  if (mqtt) mqtt->loop();
 }

@@ -1,0 +1,75 @@
+# Home Assistant MQTT Configuration for ESP32 Matrix
+# Include this in your configuration.yaml via:
+# mqtt: !include mqtt.yaml
+# Or copy the contents into the 'mqtt' section.
+
+light:
+  - name: "Matrix Display"
+    unique_id: "esp32_matrix_display"
+    state_topic: "ledmatrix/status/state"
+    command_topic: "ledmatrix/set/state"
+    payload_on: "ON"
+    payload_off: "OFF"
+    state_value_template: "{{ value_json.state }}"
+    
+    # Brightness controls global panel brightness
+    brightness_state_topic: "ledmatrix/status/state"
+    brightness_command_topic: "ledmatrix/set/brightness"
+    brightness_value_template: "{{ value_json.brightness }}"
+    
+    # Color controls Text Color (RGB)
+    rgb_command_topic: "ledmatrix/set/textcolor"
+    rgb_command_template: "{{ value }}" # Default is r,g,b string which our code parses
+    
+    availability_topic: "ledmatrix/status/availability"
+    icon: "mdi:led-variant"
+
+select:
+  - name: "Matrix Playlist"
+    unique_id: "esp32_matrix_playlist"
+    state_topic: "ledmatrix/status/state"
+    command_topic: "ledmatrix/set/playlist"
+    value_template: "{{ value_json.playlist }}"
+    # Options will be auto-populated if Discovery is used, 
+    # otherwise list your folders here manually:
+    options:
+      - "ALL"
+      - "Pokemon"
+      - "Mario"
+    icon: "mdi:playlist-play"
+
+switch:
+  - name: "Matrix Shuffle"
+    unique_id: "esp32_matrix_shuffle"
+    state_topic: "ledmatrix/status/state"
+    command_topic: "ledmatrix/set/shuffle"
+    payload_on: "ON"
+    payload_off: "OFF"
+    value_template: "{{ value_json.shuffle }}"
+    icon: "mdi:shuffle"
+
+number:
+  - name: "Matrix Loop Duration"
+    unique_id: "esp32_matrix_duration"
+    state_topic: "ledmatrix/status/state"
+    command_topic: "ledmatrix/set/duration"
+    min: 5000
+    max: 3600000
+    step: 5000
+    unit_of_measurement: "ms"
+    value_template: "{{ value_json.duration }}"
+    icon: "mdi:timer-outline"
+
+  - name: "Matrix Font Size"
+    unique_id: "esp32_matrix_fontsize"
+    command_topic: "ledmatrix/set/fontsize"
+    min: 1
+    max: 8
+    step: 1
+    icon: "mdi:format-size"
+
+text:
+  - name: "Matrix Send Text"
+    unique_id: "esp32_matrix_text"
+    command_topic: "ledmatrix/set/text"
+    icon: "mdi:text-variant"

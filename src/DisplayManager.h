@@ -29,7 +29,16 @@ public:
     void stop();
     void forceStop(); // Synchronous stop for deletion
     
+    // Hardware Control for OTA
+    void stopDMA() { if(dma) dma->stopDMAoutput(); }
+    void resumeDMA() { if(dma) dma->begin(); }
+    
     String getCurrentFile() { return currentFile; }
+    uint8_t getBrightness() { return currentBrightness; }
+    String getCurrentPlaylist() { return currentPlaylist; }
+    bool getShuffle() { return isShuffle; }
+    unsigned long getLoopDuration() { return loopDurationMs; }
+    bool getIsPlaying() { return isPlaying; }
 
     // Streaming
     void startStreaming();
@@ -38,6 +47,7 @@ public:
     // Text
     void showText(const String& text, bool scroll = false);
     void setTextColor(uint8_t r, uint8_t g, uint8_t b);
+    void setTextSize(uint8_t size);
     
     // Static Access for C-Callbacks
     static MatrixPanel_I2S_DMA* dma;
@@ -54,9 +64,16 @@ private:
     String textMessage;
     bool textScroll = false;
     uint16_t textColor = 0xFFFF; // White
+    uint8_t textSize = DEFAULT_FONT_SIZE;
     int textX = 0;
     int textWidth = 0;
     unsigned long lastScrollTime = 0;
+
+    // State Backup (for returning from Text Mode)
+    bool savedIsPlaying = false;
+    bool savedSingleMode = false;
+    String savedCurrentFile;
+    String savedCurrentPlaylist;
 
     // Streaming (Triple Buffering)
     uint8_t* netBuffer = nullptr;   // Network writes here
@@ -67,19 +84,25 @@ private:
     
     // Pending Commands (from other tasks)
     bool cmdPending = false;
-    enum CmdType { CMD_NONE, CMD_PLAY_SINGLE, CMD_PLAY_ALL, CMD_STOP, CMD_SET_DURATION, CMD_SET_ROTATION, CMD_START_STREAM, CMD_SET_BRIGHTNESS, CMD_SHOW_TEXT, CMD_SET_PLAYLIST, CMD_SET_SHUFFLE };
+    enum CmdType { CMD_NONE, CMD_PLAY_SINGLE, CMD_PLAY_ALL, CMD_STOP, CMD_SET_DURATION, CMD_SET_ROTATION, CMD_START_STREAM, CMD_SET_BRIGHTNESS, CMD_SHOW_TEXT, CMD_SET_PLAYLIST, CMD_SET_SHUFFLE, CMD_SET_TEXT_COLOR, CMD_SET_FONT_SIZE };
     CmdType pendingCmd = CMD_NONE;
     String pendingParam;
     unsigned long pendingVal = 0;
     int pendingInt = 0;
     bool pendingBool = false; // For scroll flag
+    uint8_t pendingR, pendingG, pendingB; // For Color Command
 
     // State
+    uint8_t currentBrightness = DEFAULT_BRIGHTNESS; // Track locally since library has no getter
     bool isPlaying = false;
     bool isStreaming = false;
     bool singleMode = false;
     bool isShuffle = false;
-    std::vector<String> playlist;
+    
+    std::vector<String> playlist; // Current file list (one folder)
+    std::vector<String> metaPlaylist; // List of folders to play
+    int metaPlaylistIndex = -1;
+    
     String currentPlaylist = "ALL";
     int playlistIndex = 0;
     String currentFile;
@@ -93,6 +116,7 @@ private:
 
     // Internal Logic
     void loadNextInPlaylist();
+    void loadPlaylistFolder(const String& folder);
     void _playFile(const String& path);
     void _playAll(const String& playlistName = "");
     void _stop();
