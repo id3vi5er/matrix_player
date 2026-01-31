@@ -5,7 +5,7 @@ This project is a complete ecosystem for controlling a **64x64 HUB75 RGB LED Mat
 ## 🚀 Features
 
 ### Firmware (ESP32-S3)
-*   **High-Performance Playback:** Utilizes the ESP32-S3's OPI PSRAM and the `AnimatedGIF` library for smooth, glitch-free animation decoding.
+*   **High-Performance Playback:** Utilizes the ESP32-S3's OPI PSRAM to pre-load entire animations for glitch-free playback, eliminating SD/Flash bottlenecks.
 *   **Smart Playlist System:** Supports subfolders as playlists. Play specific folders or loop through everything.
 *   **Shuffle Mode:** Randomize playback order within any playlist.
 *   **Web Technology:** Integrated Async WebServer for file uploads/management and WebSockets for low-latency real-time control.
@@ -14,11 +14,21 @@ This project is a complete ecosystem for controlling a **64x64 HUB75 RGB LED Mat
 
 ### Desktop Client (Python & PyQt6)
 ![Desktop Client UI](assets/client_ui.png)
-*   **Smart Auto-Converter:** Drag & drop PNG, JPG, BMP, or GIFs. The client automatically resizes, crops, and converts them into opwtimized 64x64 GIFs before uploading.
-*   **Live Stream Mode:** Stream your PC monitor or specific windows directly to the matrix in real-time.
+*   **Smart Auto-Converter:** Drag & drop PNG, JPG, BMP, or GIFs. The client automatically resizes, crops, and converts them into optimized 64x64 GIFs with a unified palette for maximum compatibility.
+*   **Advanced Live Stream:** Stream your PC monitor or windows with extremely low latency. Includes **live settings** (⚙) to adjust cropping, scaling (Fit/Fill/Stretch), and dithering in real-time.
 *   **Remote Management:** List files, delete images, or **delete entire playlists** directly from the UI.
-*   **Real-Time Control:** Adjust brightness, rotation, playback speed (up to 24h per image), and toggle shuffle mode instantly via WebSocket.
+*   **Real-Time Control:** Adjust brightness, rotation, playback speed, and toggle shuffle mode instantly.
 *   **Text Mode:** Send scrolling text messages with custom colors.
+
+### 🎮 Twitch Integration (New!)
+A standalone script (`client/twitch_emotes.py`) connects your matrix to Twitch Chat.
+*   **Auto-Emote Display:** Automatically detects emotes in chat and displays them on the matrix.
+*   **Animation Support:** Fully supports animated Twitch emotes (GIFs).
+*   **Caching:** Downloads emotes once and caches them on the ESP32 (in `/twitch/` folder) to save bandwidth.
+*   **Idle Mode:** Shows a custom idle animation when chat is quiet.
+*   **Setup:** Copy `client/config.json.example` to `client/config.json` and enter your credentials.
+
+### Home Automation (MQTT)
 
 ### Home Automation (MQTT)
 *   **Home Assistant Integration:** Fully controllable via MQTT.

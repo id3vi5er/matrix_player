@@ -134,12 +134,15 @@ class MatrixController:
 
     def upload_file(self, filename, file_bytes_io):
         """Uploads a file via HTTP POST"""
-        print(f"[Matrix] Uploading {filename}...")
+        print(f"[Matrix] Uploading {filename} to /twitch/...")
         try:
+            # We use the X-Playlist header to tell the ESP32 to put this in the /twitch folder
+            headers = {"X-Playlist": "twitch"}
             files = {'file': (filename, file_bytes_io, 'image/gif')}
-            r = requests.post(self.upload_url, files=files, timeout=10)
+            
+            r = requests.post(self.upload_url, files=files, headers=headers, timeout=10)
             if r.status_code == 200:
-                self.known_files.add(f"/{filename}")
+                self.known_files.add(f"/twitch/{filename}")
                 return True
             else:
                 print(f"[Matrix] Upload failed: {r.status_code}")
@@ -150,24 +153,30 @@ class MatrixController:
 
     def play_file(self, filename):
         """Sends Play command via WebSocket"""
+        # Ensure path starts with /twitch/ if it's an emote, or is fully qualified
         if not filename.startswith("/"):
-            filename = "/" + filename
+            if not filename.startswith("twitch/"):
+                filename = "/twitch/" + filename
+            else:
+                filename = "/" + filename
         
         if self.connected:
             self.ws.send(json.dumps({"cmd": "play", "file": filename}))
             # print(f"[Matrix] Playing {filename}")
 
     def ensure_and_play(self, filename, image_data):
-        """Checks if file exists, uploads if not, then plays."""
-        target_name = f"/{filename}"
-        if target_name not in self.known_files:
-            # Prepare bytes
+        """Checks if file exists in /twitch/, uploads if not, then plays."""
+        # Filename should be just the name, e.g. "t_123.gif"
+        target_path = f"/twitch/{filename}"
+        
+        if target_path not in self.known_files:
+            # Prepare bytes (Animated GIF support is inside process_to_gif_bytes)
             gif_io = process_to_gif_bytes(image_data)
             success = self.upload_file(filename, gif_io)
             if not success:
                 return
         
-        self.play_file(filename)
+        self.play_file(target_path)
 
 class TwitchBot:
     def __init__(self, channel, token, username, matrix_controller):
@@ -260,11 +269,16 @@ class TwitchBot:
         # Try to find local file to upload if missing on ESP
         local_path = idle_name
         if os.path.exists(local_path):
-            img = Image.open(local_path)
-            self.matrix.ensure_and_play(idle_name, img)
+            try:
+                img = Image.open(local_path)
+                # Upload as idle.gif to twitch folder
+                self.matrix.ensure_and_play("idle.gif", img)
+            except Exception as e:
+                print(f"Error showing idle: {e}")
         else:
-            # Just try to play it, maybe it's already there
-            self.matrix.play_file(idle_name)
+            # Just try to play it, maybe it's already there (legacy)
+            # Default to twitch folder version
+            self.matrix.play_file("/twitch/idle.gif")
 
     def _on_error(self, ws, error):
         print(f"[Twitch] Error: {error}")
