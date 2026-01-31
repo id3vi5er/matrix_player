@@ -3,6 +3,7 @@
 #include <AnimatedGIF.h>
 #include <vector>
 #include <mutex>
+#include <atomic>
 #include <functional>
 #include "Config.h"
 #include "FileManager.h"
@@ -81,7 +82,8 @@ private:
     uint8_t* drawBuffer = nullptr;  // Currently being drawn
     bool newFrameAvailable = false; // Flag if readyBuffer has new content
     std::mutex streamMutex;         // Protects swapping readyBuffer <-> netBuffer/drawBuffer
-    
+    std::atomic<bool> allowIncomingStream{false}; // Allows Network Task to write to buffer even if Loop hasn't switched mode yet
+
     // Pending Commands (from other tasks)
     bool cmdPending = false;
     enum CmdType { CMD_NONE, CMD_PLAY_SINGLE, CMD_PLAY_ALL, CMD_STOP, CMD_SET_DURATION, CMD_SET_ROTATION, CMD_START_STREAM, CMD_SET_BRIGHTNESS, CMD_SHOW_TEXT, CMD_SET_PLAYLIST, CMD_SET_SHUFFLE, CMD_SET_TEXT_COLOR, CMD_SET_FONT_SIZE };

@@ -7,4 +7,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 src/Secrets.h
+
+# Client
 client/venv/
+client/config.json
+client/build/
+client/dist/
+client/*.spec

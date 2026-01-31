@@ -1,0 +1,8 @@
+{
+    "esp32_ip": "192.168.178.155",
+    "twitch_channel": "YOUR_CHANNEL_NAME",
+    "twitch_oauth_token": "oauth:YOUR_TOKEN_HERE",
+    "twitch_username": "YOUR_BOT_USERNAME",
+    "show_duration": 3.0,
+    "idle_image": "idle.png"
+}

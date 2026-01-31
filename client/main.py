@@ -124,6 +124,70 @@ QSlider::handle:horizontal {
 }
 """
 
+def process_image_to_bytes(img_src, settings, mode="upload"):
+    """
+    settings: dict with keys: res_mode, dither, bg_color, keep_trans, scale_mode, centering
+    """
+    frames = []
+    durations = []
+    is_animated = getattr(img_src, "is_animated", False)
+    
+    # Extract settings
+    res_mode = settings.get('res_mode', Image.Resampling.LANCZOS)
+    dither_mode = settings.get('dither', Image.Dither.NONE)
+    bg_color = settings.get('bg_color', (0,0,0,255))
+    keep_trans = settings.get('keep_trans', False)
+    scale_mode = settings.get('scale_mode', 1) # 1=Fit
+    centering = settings.get('centering', (0.5, 0.5))
+
+    def proc_frame(frame):
+        rgba = frame.convert("RGBA")
+        
+        # 1. Scaling Logic
+        if scale_mode == 0: # Stretch
+            if rgba.size != (64, 64):
+                rgba = rgba.resize((64, 64), res_mode)
+        elif scale_mode == 1: # Fit
+            rgba.thumbnail((64, 64), res_mode)
+            new_bg = Image.new("RGBA", (64, 64), (0,0,0,0))
+            x = (64 - rgba.width) // 2
+            y = (64 - rgba.height) // 2
+            new_bg.paste(rgba, (x, y))
+            rgba = new_bg
+        elif scale_mode == 2: # Fill
+            rgba = ImageOps.fit(rgba, (64, 64), method=res_mode, centering=centering)
+        
+        # 2. Background
+        if not keep_trans:
+            bg = Image.new("RGBA", (64, 64), bg_color)
+            bg.paste(rgba, (0, 0), rgba)
+            rgba = bg
+        
+        # 3. Output Format
+        if mode == "upload":
+            return rgba.convert("P", palette=Image.Palette.ADAPTIVE, dither=dither_mode)
+        else:
+            return rgba.convert("RGB")
+
+    # Stream Mode: Return raw bytes immediately
+    if mode == "stream" or mode == "settings_only":
+        frame = ImageSequence.Iterator(img_src)[0] if is_animated else img_src
+        return io.BytesIO(proc_frame(frame).tobytes())
+
+    # Upload Mode: Collect frames and save as GIF
+    if is_animated:
+        for frame in ImageSequence.Iterator(img_src):
+            frames.append(proc_frame(frame))
+            durations.append(frame.info.get('duration', 100))
+    else:
+        frames.append(proc_frame(img_src))
+        durations.append(200)
+
+    out = io.BytesIO()
+    frames[0].save(out, format='GIF', save_all=True, append_images=frames[1:], duration=durations, loop=0, disposal=2)
+    out.seek(0)
+    return out
+
 class ImageFetcher(QThread):
     loaded = pyqtSignal(str, bytes)
 
@@ -145,7 +209,10 @@ class UploadDialog(QDialog):
         super().__init__(parent)
         self.mode = mode
         
-        title = "Upload Images - Converter Settings" if mode == "upload" else "Show Static Image (HD) - Settings"
+        if mode == "upload": title = "Upload Images - Converter Settings"
+        elif mode == "stream": title = "Show Static Image (HD) - Settings"
+        else: title = "Live Stream Settings"
+        
         self.setWindowTitle(title)
         self.resize(1000, 700)
         self.setStyleSheet(parent.styleSheet() if parent else "")
@@ -154,31 +221,42 @@ class UploadDialog(QDialog):
         self.processed_data = None # This will now be for the currently selected/first preview
         self.original_image = None
         
+        # Load test image for settings preview if in settings mode
+        if self.mode == "settings_only":
+             # Create dummy image or load a placeholder
+             self.original_image = Image.new('RGB', (320, 240), color = 'gray')
+             # Draw some patterns
+             from PIL import ImageDraw
+             d = ImageDraw.Draw(self.original_image)
+             d.rectangle([(50,50),(270,190)], fill="blue", outline="white")
+             d.text((60,60), "Preview Image", fill="white")
+        
         self.init_ui()
 
     def init_ui(self):
         layout = QVBoxLayout(self)
 
         # 1. Top: File Selection & Playlist
-        top_layout = QVBoxLayout()
-        
-        h_file = QHBoxLayout()
-        self.lbl_path = QLabel("No files selected")
-        btn_browse = QPushButton("Select Images...")
-        btn_browse.setObjectName("primary")
-        btn_browse.clicked.connect(self.browse_files)
-        h_file.addWidget(self.lbl_path, 1)
-        h_file.addWidget(btn_browse)
-        top_layout.addLayout(h_file)
+        if self.mode != "settings_only":
+            top_layout = QVBoxLayout()
+            
+            h_file = QHBoxLayout()
+            self.lbl_path = QLabel("No files selected")
+            btn_browse = QPushButton("Select Images...")
+            btn_browse.setObjectName("primary")
+            btn_browse.clicked.connect(self.browse_files)
+            h_file.addWidget(self.lbl_path, 1)
+            h_file.addWidget(btn_browse)
+            top_layout.addLayout(h_file)
 
-        if self.mode == "upload":
-            h_playlist = QHBoxLayout()
-            h_playlist.addWidget(QLabel("Playlist / Tag:"))
-            self.playlist_input = QLineEdit("Default")
-            h_playlist.addWidget(self.playlist_input)
-            top_layout.addLayout(h_playlist)
+            if self.mode == "upload":
+                h_playlist = QHBoxLayout()
+                h_playlist.addWidget(QLabel("Playlist / Tag:"))
+                self.playlist_input = QLineEdit("Default")
+                h_playlist.addWidget(self.playlist_input)
+                top_layout.addLayout(h_playlist)
 
-        layout.addLayout(top_layout)
+            layout.addLayout(top_layout)
 
         # 2. Middle: Splitter (Original | Preview) + Settings
         h_mid = QHBoxLayout()
@@ -264,11 +342,14 @@ class UploadDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         self.btn_ok = buttons.button(QDialogButtonBox.StandardButton.Ok)
-        self.btn_ok.setText("Upload All" if self.mode == "upload" else "Show Live")
+        self.btn_ok.setText("Upload All" if self.mode == "upload" else ("Apply" if self.mode == "settings_only" else "Show Live"))
         self.btn_ok.setEnabled(False)
         layout.addWidget(buttons)
         
         self.toggle_crop_controls()
+        
+        if self.mode == "settings_only":
+             self.load_image_object(self.original_image)
 
     def toggle_crop_controls(self):
         is_fill = (self.combo_scale.currentIndex() == 2)
@@ -276,6 +357,24 @@ class UploadDialog(QDialog):
         self.slider_cx.setVisible(is_fill)
         self.lbl_cy.setVisible(is_fill)
         self.slider_cy.setVisible(is_fill)
+
+    def load_image_object(self, img):
+        self.original_image = img
+        img_display = self.original_image.convert("RGBA")
+        ratio = min(320 / img_display.width, 320 / img_display.height)
+        new_size = (int(img_display.width * ratio), int(img_display.height * ratio))
+        img_display = img_display.resize(new_size, Image.Resampling.LANCZOS)
+        
+        canvas = Image.new("RGBA", (320, 320), (0, 0, 0, 0))
+        x = (320 - img_display.width) // 2
+        y = (320 - img_display.height) // 2
+        canvas.paste(img_display, (x, y))
+        
+        qim = QImage(canvas.tobytes(), 320, 320, 4 * 320, QImage.Format.Format_RGBA8888)
+        self.lbl_orig.setPixmap(QPixmap.fromImage(qim))
+        
+        self.update_preview()
+        self.btn_ok.setEnabled(True)
 
     def browse_files(self):
         paths, _ = QFileDialog.getOpenFileNames(self, "Select Images", "", "Images (*.png *.jpg *.jpeg *.bmp *.gif)")
@@ -305,7 +404,7 @@ class UploadDialog(QDialog):
         self.btn_ok.setEnabled(True)
 
     def update_preview(self):
-        if not self.source_paths: return
+        if not self.source_paths and not self.original_image: return
         
         try:
             # 0. Direct Upload Mode
@@ -381,57 +480,16 @@ class UploadDialog(QDialog):
             print(f"Preview Error: {e}")
 
     def process_to_bytes(self, img_src, res_mode, dither_mode, bg_color, keep_trans, scale_mode, centering=(0.5, 0.5)):
-        frames = []
-        durations = []
-        is_animated = getattr(img_src, "is_animated", False)
-        
-        def proc_frame(frame):
-            rgba = frame.convert("RGBA")
-            
-            # 1. Scaling Logic
-            if scale_mode == 0: # Stretch
-                if rgba.size != (64, 64):
-                    rgba = rgba.resize((64, 64), res_mode)
-            elif scale_mode == 1: # Fit
-                rgba.thumbnail((64, 64), res_mode)
-                new_bg = Image.new("RGBA", (64, 64), (0,0,0,0))
-                x = (64 - rgba.width) // 2
-                y = (64 - rgba.height) // 2
-                new_bg.paste(rgba, (x, y))
-                rgba = new_bg
-            elif scale_mode == 2: # Fill
-                rgba = ImageOps.fit(rgba, (64, 64), method=res_mode, centering=centering)
-            
-            # 2. Background
-            if not keep_trans:
-                bg = Image.new("RGBA", (64, 64), bg_color)
-                bg.paste(rgba, (0, 0), rgba)
-                rgba = bg
-            
-            # 3. Output Format
-            if self.mode == "upload":
-                return rgba.convert("P", palette=Image.Palette.ADAPTIVE, dither=dither_mode)
-            else:
-                return rgba.convert("RGB")
-
-        # Stream Mode: Return raw bytes immediately
-        if self.mode == "stream":
-            frame = ImageSequence.Iterator(img_src)[0] if is_animated else img_src
-            return io.BytesIO(proc_frame(frame).tobytes())
-
-        # Upload Mode: Collect frames and save as GIF
-        if is_animated:
-            for frame in ImageSequence.Iterator(img_src):
-                frames.append(proc_frame(frame))
-                durations.append(frame.info.get('duration', 100))
-        else:
-            frames.append(proc_frame(img_src))
-            durations.append(200)
-
-        out = io.BytesIO()
-        frames[0].save(out, format='GIF', save_all=True, append_images=frames[1:], duration=durations, loop=0, disposal=2)
-        out.seek(0)
-        return out
+        # Wrapper for global function
+        settings = {
+            "res_mode": res_mode,
+            "dither": dither_mode,
+            "bg_color": bg_color,
+            "keep_trans": keep_trans,
+            "scale_mode": scale_mode,
+            "centering": centering
+        }
+        return process_image_to_bytes(img_src, settings, self.mode)
 
     def get_settings(self):
         """Returns the processing settings to apply to all images"""
@@ -482,10 +540,18 @@ class MatrixApp(QMainWindow):
 
         self.sct = mss.mss()
         self.can_send_stream = True
+        self.last_frame_time = 0
         
         self.stats_frames = 0
         self.stats_bytes = 0
+        self.fps_history = []
         
+        self.stream_settings = {
+            "scale_mode": 1, # Fit
+            "res_mode": Image.Resampling.LANCZOS,
+            "bg_color": (0,0,0,255)
+        }
+
         self.image_cache = {} # filename -> QPixmap
         self.current_remote_file = ""
         self.all_files = [] # Store raw list from server
@@ -708,7 +774,16 @@ class MatrixApp(QMainWindow):
         self.stream_btn = QPushButton("Start Live Stream")
         self.stream_btn.setCheckable(True)
         self.stream_btn.clicked.connect(self.toggle_stream)
-        l_stream.addWidget(self.stream_btn)
+        
+        self.stream_sett_btn = QPushButton("⚙")
+        self.stream_sett_btn.setFixedWidth(30)
+        self.stream_sett_btn.setToolTip("Stream Settings (Crop/Scale)")
+        self.stream_sett_btn.clicked.connect(self.open_stream_settings)
+        
+        h_stream_btn = QHBoxLayout()
+        h_stream_btn.addWidget(self.stream_btn)
+        h_stream_btn.addWidget(self.stream_sett_btn)
+        l_stream.addLayout(h_stream_btn)
 
         self.static_btn = QPushButton("Show Static Image (HD)")
         self.static_btn.setToolTip("Displays an image in full color quality via streaming mode (PC must stay connected)")
@@ -1015,6 +1090,46 @@ class MatrixApp(QMainWindow):
         if current_idx >= 0 and current_idx < self.source_combo.count():
             self.source_combo.setCurrentIndex(current_idx)
 
+    def grab_current_source_image(self):
+        try:
+            source_data = self.source_combo.currentData()
+            sct_img = None
+
+            if source_data and source_data['type'] == 'monitor':
+                monitor = self.sct.monitors[source_data['idx']]
+                sct_img = self.sct.grab(monitor)
+                
+            elif source_data and source_data['type'] == 'window':
+                wins = gw.getWindowsWithTitle(source_data['title'])
+                if wins:
+                    w = wins[0]
+                    if not w.isMinimized and w.width > 0 and w.height > 0:
+                        rect = {"top": w.top, "left": w.left, "width": w.width, "height": w.height}
+                        sct_img = self.sct.grab(rect)
+            
+            if sct_img:
+                return Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
+        except:
+            pass
+        return None
+
+    def open_stream_settings(self):
+        dlg = UploadDialog(self, mode="settings_only")
+        
+        # Try to get live image
+        live_img = self.grab_current_source_image()
+        if live_img:
+            dlg.load_image_object(live_img)
+            
+        # Pre-set values (optional improvement: load current settings into dialog)
+        # For now, dialog starts with defaults, which might be confusing if they differ from current.
+        # Ideally we should pass self.stream_settings to dialog.
+        
+        if dlg.exec():
+            _, settings = dlg.get_result()
+            self.stream_settings = settings
+            self.status_lbl.setText("Stream Settings Updated")
+
     def toggle_stream(self, checked):
         # Stop any static image keep-alive
         if hasattr(self, 'static_timer') and self.static_timer.isActive():
@@ -1044,36 +1159,30 @@ class MatrixApp(QMainWindow):
             self.toggle_stream(False)
             return
 
+        # Flow Control with Timeout (Safety against dropped ACKs)
         if not self.can_send_stream:
-            return 
+            if time.time() - self.last_frame_time > 2.0: # 2s Timeout (Emergency Reset)
+                self.can_send_stream = True
+                print("Stream ACK Timeout - Resetting flow control")
+            else:
+                return 
 
         try:
-            source_data = self.source_combo.currentData()
-            sct_img = None
+            img = self.grab_current_source_image()
 
-            if source_data and source_data['type'] == 'monitor':
-                monitor = self.sct.monitors[source_data['idx']]
-                sct_img = self.sct.grab(monitor)
-                
-            elif source_data and source_data['type'] == 'window':
-                wins = gw.getWindowsWithTitle(source_data['title'])
-                if wins:
-                    w = wins[0]
-                    if not w.isMinimized and w.width > 0 and w.height > 0:
-                        rect = {"top": w.top, "left": w.left, "width": w.width, "height": w.height}
-                        sct_img = self.sct.grab(rect)
-
-            if sct_img:
-                img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
-                img = img.resize((64, 64), Image.Resampling.BILINEAR)
+            if img:
+                # Apply Settings
+                output_io = process_image_to_bytes(img, self.stream_settings, mode="stream")
+                output_io.seek(0)
+                data = output_io.read()
                 
                 # Preview
-                data = img.tobytes() 
                 qimg = QImage(data, 64, 64, 64*3, QImage.Format.Format_RGB888)
                 self.local_preview_lbl.setPixmap(QPixmap.fromImage(qimg).scaled(256, 256, Qt.AspectRatioMode.KeepAspectRatio))
     
                 self.socket.sendBinaryMessage(data)
                 self.can_send_stream = False 
+                self.last_frame_time = time.time()
                 
                 self.stats_frames += 1
                 self.stats_bytes += len(data)
@@ -1083,10 +1192,20 @@ class MatrixApp(QMainWindow):
 
     def update_stats(self):
         if self.stream_btn.isChecked():
-            fps = self.stats_frames
+            # Rolling Average for FPS
+            self.fps_history.append(self.stats_frames)
+            if len(self.fps_history) > 5:
+                self.fps_history.pop(0)
+            
+            avg_fps = sum(self.fps_history) / len(self.fps_history)
+            
             kbps = self.stats_bytes / 1024.0
-            self.stats_lbl.setText(f"{fps} FPS | {kbps:.1f} KB/s")
+            
+            self.stats_lbl.setText(f"{avg_fps:.1f} FPS | {kbps:.1f} KB/s")
             self.stats_bytes = 0
+            self.stats_frames = 0
+        else:
+             self.fps_history = []
 
     def send_static_image(self):
         if self.socket.state() != QAbstractSocket.SocketState.ConnectedState:

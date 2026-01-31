@@ -151,6 +151,7 @@ void DisplayManager::startStreaming() {
     std::lock_guard<std::mutex> lk(cmdMutex);
     pendingCmd = CMD_START_STREAM;
     cmdPending = true;
+    allowIncomingStream = true; // Accept data immediately
 }
 
 void DisplayManager::showText(const String& text, bool scroll) {
@@ -179,7 +180,7 @@ void DisplayManager::setTextSize(uint8_t size) {
 
 // Handling fragmented WebSocket frames safely
 bool DisplayManager::handleStreamChunk(uint8_t* data, size_t len, size_t index, size_t totalLen) {
-    if (!isStreaming || !netBuffer) return false;
+    if (!allowIncomingStream || !netBuffer) return false;
     
     size_t bufferSize = PANEL_RES_X * PANEL_RES_Y * 3;
     if (index + len > bufferSize) return false;
@@ -226,6 +227,7 @@ void DisplayManager::forceStop() {
     std::lock_guard<std::mutex> gifLk(gifMutex);
     
     // Reset state
+    allowIncomingStream = false;
     isStreaming = false;
     isPlaying = false;
     isTextMode = false;
@@ -341,6 +343,7 @@ void DisplayManager::loadPlaylistFolder(const String& folder) {
 
 void DisplayManager::_stop() {
     std::lock_guard<std::mutex> gifLk(gifMutex);
+    allowIncomingStream = false;
     isStreaming = false;
     isPlaying = false;
     isTextMode = false;
@@ -530,6 +533,7 @@ void DisplayManager::loop() {
             case CMD_START_STREAM:
                 _stop(); // Stop any GIF
                 isStreaming = true;
+                allowIncomingStream = true;
                 break;
             case CMD_SHOW_TEXT:
                 _showText(paramToExec, boolToExec);
