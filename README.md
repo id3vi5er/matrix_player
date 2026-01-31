@@ -13,6 +13,7 @@ This project is a complete ecosystem for controlling a **64x64 HUB75 RGB LED Mat
 *   **LittleFS:** Efficient file management on the 16MB Flash memory.
 
 ### Desktop Client (Python & PyQt6)
+![Desktop Client UI](assets/client_ui.png)
 *   **Smart Auto-Converter:** Drag & drop PNG, JPG, BMP, or GIFs. The client automatically resizes, crops, and converts them into opwtimized 64x64 GIFs before uploading.
 *   **Live Stream Mode:** Stream your PC monitor or specific windows directly to the matrix in real-time.
 *   **Remote Management:** List files, delete images, or **delete entire playlists** directly from the UI.
@@ -73,6 +74,7 @@ Configured in `src/Config.h`. Matches standard libraries for ESP32-S3:
 ## 📖 How to Use
 1.  **Connect:** Enter the ESP32's IP address (shown in Serial Monitor) and click "Connect".
 2.  **Upload:** Click "Upload New Image/GIF".
+    ![Upload Window](assets/upload_window.png)
     *   Select multiple files.
     *   Enter a "Playlist / Tag" name (this creates a folder on the ESP32).
     *   The client handles resizing and conversion automatically.

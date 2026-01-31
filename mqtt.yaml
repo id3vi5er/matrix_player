@@ -73,3 +73,10 @@ text:
     unique_id: "esp32_matrix_text"
     command_topic: "ledmatrix/set/text"
     icon: "mdi:text-variant"
+
+  - name: "Matrix Play File"
+    unique_id: "esp32_matrix_file"
+    state_topic: "ledmatrix/status/state"
+    command_topic: "ledmatrix/set/file"
+    value_template: "{{ value_json.file }}"
+    icon: "mdi:file-image"

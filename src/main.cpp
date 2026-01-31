@@ -22,6 +22,12 @@ void setup() {
   mqtt = new MqttManager(&display, &fileMgr);
   mqtt->begin();
 
+  // Register Callback for File Changes
+  display.setFileChangeCallback([](String file){
+      if (network) network->broadcastStatus(file);
+      if (mqtt) mqtt->sendStatus();
+  });
+
   display.playAll(DEFAULT_PLAYLIST);
 }
 
