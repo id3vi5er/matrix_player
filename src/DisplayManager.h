@@ -115,6 +115,10 @@ private:
     unsigned long loopDurationMs = DEFAULT_LOOP_DURATION;
     unsigned long currentGifStartTime = 0;
     unsigned long nextGifFrameTime = 0;
+    
+    // RAM Playback
+    uint8_t* currentGifData = nullptr;
+    void freeGifData();
 
     // Internal Logic
     void loadNextInPlaylist();

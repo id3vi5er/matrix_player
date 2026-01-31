@@ -80,7 +80,10 @@ void NetworkManager::begin() {
         request->send(200, "text/plain", "OK");
     }, [this](AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final){
         static File uploadFile;
+        static size_t totalBytes = 0;
+
         if(!index){
+            totalBytes = 0;
             String folder = "";
             if (request->hasHeader("X-Playlist")) {
                 folder = request->getHeader("X-Playlist")->value();
@@ -90,27 +93,28 @@ void NetworkManager::begin() {
             String path = "/" + folder;
             if (!LittleFS.exists(path)) LittleFS.mkdir(path);
             
-            // Construct full path
             String fullPath = path + "/" + filename;
             fullPath.replace("//", "/");
             
-            Serial.printf("Upload Start: %s\n", fullPath.c_str());
+            if(Serial) Serial.printf("Upload Start: %s\n", fullPath.c_str());
             
             uploadFile = this->fileMgr->open(fullPath, "w");
             if(!uploadFile){
-                 Serial.printf("Upload Error: Failed to open %s for writing\n", fullPath.c_str());
+                 if(Serial) Serial.printf("Upload Error: Failed to open %s for writing\n", fullPath.c_str());
             }
         }
         if(uploadFile){
-            uploadFile.write(data, len);
+            size_t written = uploadFile.write(data, len);
+            totalBytes += written;
+            if (written != len) {
+                if(Serial) Serial.printf("Upload WRITE ERROR: Requested %u, wrote %u\n", len, written);
+            }
+            delay(1); // Yield to prevent Flash write saturation/watchdog issues
         }
         if(final){
             if(uploadFile) {
                 uploadFile.close();
-                Serial.println("Upload End.");
-                // Do NOT notify clients automatically to prevent WDT crash during batch uploads
-                // The client is responsible for refreshing the list when done.
-                // ws.textAll("{\"cmd\":\"reload\"}");
+                if(Serial) Serial.printf("Upload Finished. Total size: %u bytes\n", totalBytes);
             }
         }
     });

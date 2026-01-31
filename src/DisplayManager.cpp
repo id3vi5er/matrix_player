@@ -10,7 +10,7 @@ void* DisplayManager::GIFOpenFile(const char *fname, int32_t *pSize) {
         *pSize = f.size();
         File* fPtr = new File(f);
         validFiles.insert((void*)fPtr);
-        Serial.printf("GIFOpen: %s -> %p\n", fname, fPtr);
+        Serial.printf("GIFOpen: %s -> %p (Size: %d bytes)\n", fname, fPtr, *pSize);
         return (void*)fPtr;
     }
     Serial.printf("GIFOpen FAILED: %s\n", fname);
@@ -33,17 +33,37 @@ void DisplayManager::GIFCloseFile(void *pHandle) {
 
 int32_t DisplayManager::GIFReadFile(GIFFILE *pFile, uint8_t *pBuf, int32_t iLen) {
     File *f = static_cast<File*>(pFile->fHandle);
-    if (f) return f->read(pBuf, iLen);
+    if (f) {
+        // Safe Read Workaround for PSRAM/Alignment issues:
+        // Read into internal stack buffer first, then copy.
+        // iLen is usually small (chunk size).
+        if (iLen > 256) {
+            // Direct read for large chunks (hope for the best or implement loop)
+            // But GIF chunks are usually small (255 bytes).
+            return f->read(pBuf, iLen); 
+        }
+        
+        uint8_t tempBuf[256]; // Stack buffer (Internal RAM)
+        int32_t r = f->read(tempBuf, iLen);
+        if (r > 0) {
+            memcpy(pBuf, tempBuf, r);
+        }
+        
+        if (r != iLen) {
+             if(Serial) Serial.printf("GIFRead Error: Requested %d, got %d\n", iLen, r);
+        }
+        return r;
+    }
     return 0;
 }
 
 int32_t DisplayManager::GIFSeekFile(GIFFILE *pFile, int32_t iPosition) {
     File *f = static_cast<File*>(pFile->fHandle);
     if (f) {
-        f->seek(iPosition);
-        return iPosition;
+        if (f->seek(iPosition)) return iPosition;
+        Serial.printf("GIFSeek Error: Pos %d failed. Size: %d\n", iPosition, f->size());
     }
-    return 0;
+    return -1;
 }
 
 void DisplayManager::GIFDraw(GIFDRAW *pDraw) {
@@ -53,9 +73,13 @@ void DisplayManager::GIFDraw(GIFDRAW *pDraw) {
     uint16_t *usPalette = pDraw->pPalette;
     int y = pDraw->iY + pDraw->y;
     int iWidth = pDraw->iWidth;
-    if (iWidth > PANEL_RES_X) iWidth = PANEL_RES_X;
+    int x_offset = pDraw->iX;
+
+    // Safety: Skip lines outside the matrix
+    if (y < 0 || y >= PANEL_RES_Y) return;
 
     // Handle Transparency and Background
+    // Method 2: Restore to background color
     if (pDraw->ucDisposalMethod == 2) { 
         for (int x = 0; x < iWidth; x++) {
             if (s[x] == pDraw->ucTransparent) s[x] = pDraw->ucBackground;
@@ -63,14 +87,17 @@ void DisplayManager::GIFDraw(GIFDRAW *pDraw) {
         pDraw->ucHasTransparency = 0;
     }
 
-    // Draw
+    // Draw scanline
     for (int x = 0; x < iWidth; x++) {
+        int real_x = x_offset + x;
+        if (real_x < 0 || real_x >= PANEL_RES_X) continue;
+
         if (pDraw->ucHasTransparency && s[x] == pDraw->ucTransparent) continue;
-        dma->drawPixel(pDraw->iX + x, y, usPalette[s[x]]);
+        dma->drawPixel(real_x, y, usPalette[s[x]]);
     }
 }
 
-// --- Class Implementation ---
+// ... Class Implementation ...
 
 void DisplayManager::begin(FileManager* fm) {
     fileMgr = fm;
@@ -97,11 +124,18 @@ void DisplayManager::begin(FileManager* fm) {
     dma->clearScreen();
 
     // Allocate 3 Buffers for Triple Buffering (36KB total)
-    // Using internal RAM (MALLOC_CAP_8BIT) for maximum speed and to avoid PSRAM cache issues
+    // Use PSRAM (SPIRAM) to save internal SRAM for GIF decoding
     size_t bufSize = PANEL_RES_X * PANEL_RES_Y * 3;
-    netBuffer   = (uint8_t*)heap_caps_malloc(bufSize, MALLOC_CAP_8BIT);
-    readyBuffer = (uint8_t*)heap_caps_malloc(bufSize, MALLOC_CAP_8BIT);
-    drawBuffer  = (uint8_t*)heap_caps_malloc(bufSize, MALLOC_CAP_8BIT);
+    netBuffer   = (uint8_t*)heap_caps_malloc(bufSize, MALLOC_CAP_SPIRAM);
+    readyBuffer = (uint8_t*)heap_caps_malloc(bufSize, MALLOC_CAP_SPIRAM);
+    drawBuffer  = (uint8_t*)heap_caps_malloc(bufSize, MALLOC_CAP_SPIRAM);
+
+    if (!netBuffer || !readyBuffer || !drawBuffer) {
+        Serial.println("DisplayManager: Failed to allocate PSRAM buffers! Trying internal RAM...");
+        netBuffer   = (uint8_t*)heap_caps_malloc(bufSize, MALLOC_CAP_8BIT);
+        readyBuffer = (uint8_t*)heap_caps_malloc(bufSize, MALLOC_CAP_8BIT);
+        drawBuffer  = (uint8_t*)heap_caps_malloc(bufSize, MALLOC_CAP_8BIT);
+    }
 
     if (!netBuffer || !readyBuffer || !drawBuffer) {
         Serial.println("DisplayManager: Failed to allocate internal RAM buffers!");
@@ -242,6 +276,13 @@ void DisplayManager::forceStop() {
 
 // --- Internal Logic (Main Loop Context) ---
 
+void DisplayManager::freeGifData() {
+    if (currentGifData) {
+        free(currentGifData);
+        currentGifData = nullptr;
+    }
+}
+
 void DisplayManager::_playFile(const String& path) {
     std::lock_guard<std::mutex> gifLk(gifMutex);
     isStreaming = false;
@@ -249,26 +290,56 @@ void DisplayManager::_playFile(const String& path) {
     singleMode = true;
     currentFile = path;
     gif.close(); 
-    // dma->clearScreen(); // Removed from here
+    freeGifData(); // Free old file
     
-    if (gif.open(path.c_str(), GIFOpenFile, GIFCloseFile, GIFReadFile, GIFSeekFile, GIFDraw)) {
+    // Load file to RAM (PSRAM preferred)
+    File f = LittleFS.open(path);
+    if (!f) {
+        if(Serial) Serial.printf("Failed to open file: %s\n", path.c_str());
+        return;
+    }
+    size_t len = f.size();
+    if (len == 0) {
+        f.close();
+        return;
+    }
+    
+    // Allocate buffer
+    currentGifData = (uint8_t*)heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
+    if (!currentGifData) {
+        // Fallback to internal RAM if small enough? Or fail.
+        currentGifData = (uint8_t*)malloc(len);
+    }
+    
+    if (!currentGifData) {
+        if(Serial) Serial.println("Failed to allocate RAM for GIF!");
+        f.close();
+        return;
+    }
+    
+    // Read all
+    f.read(currentGifData, len);
+    f.close();
+    
+    gif.begin(LITTLE_ENDIAN_PIXELS); 
+    // Open from memory
+    if (gif.open(currentGifData, len, GIFDraw)) {
         isPlaying = true;
         currentGifStartTime = millis();
-        Serial.printf("Playing Single: %s\n", path.c_str());
+        if(Serial) Serial.printf("Playing RAM: %s (%d bytes)\n", path.c_str(), len);
         
-        // Instant Start
         dma->clearScreen();
         int tDelay = 0;
         if (gif.playFrame(false, &tDelay)) {
-             if (tDelay < 10) tDelay = 100;
+             if (tDelay < 1) tDelay = 1;
              nextGifFrameTime = millis() + tDelay;
         } else {
              nextGifFrameTime = millis();
         }
-
-        pendingFileNotification = path; // Schedule callback
+        pendingFileNotification = path;
     } else {
-        Serial.println("Failed to open GIF");
+        if(Serial) Serial.printf("Failed to open GIF from RAM. Error: %d\n", gif.getLastError());
+        freeGifData();
     }
 }
 
@@ -348,6 +419,7 @@ void DisplayManager::_stop() {
     isPlaying = false;
     isTextMode = false;
     gif.close();
+    freeGifData();
     dma->clearScreen();
 }
 
@@ -386,27 +458,43 @@ void DisplayManager::loadNextInPlaylist() {
     
     // std::lock_guard<std::mutex> gifLk(gifMutex); // Caller must hold lock!
     gif.close();
+    freeGifData(); // Clear old data
     
-    if (gif.open(currentFile.c_str(), GIFOpenFile, GIFCloseFile, GIFReadFile, GIFSeekFile, GIFDraw)) {
-        isPlaying = true;
-        currentGifStartTime = millis();
-        Serial.printf("[%s] Playing: %s\n", metaPlaylist[metaPlaylistIndex].c_str(), currentFile.c_str());
+    // Load to RAM
+    File f = LittleFS.open(currentFile);
+    if (f) {
+        size_t len = f.size();
+        currentGifData = (uint8_t*)heap_caps_malloc(len, MALLOC_CAP_SPIRAM);
+        if (!currentGifData) currentGifData = (uint8_t*)malloc(len);
         
-        // Instant Start
-        dma->clearScreen();
-        int tDelay = 0;
-        if (gif.playFrame(false, &tDelay)) {
-             if (tDelay < 10) tDelay = 100;
-             nextGifFrameTime = millis() + tDelay;
+        if (currentGifData) {
+            f.read(currentGifData, len);
+            f.close();
+            
+            gif.begin(LITTLE_ENDIAN_PIXELS);
+            if (gif.open(currentGifData, len, GIFDraw)) {
+                isPlaying = true;
+                currentGifStartTime = millis();
+                if(Serial) Serial.printf("[%s] Playing RAM: %s\n", metaPlaylist[metaPlaylistIndex].c_str(), currentFile.c_str());
+                
+                dma->clearScreen();
+                int tDelay = 0;
+                if (gif.playFrame(false, &tDelay)) {
+                     if (tDelay < 1) tDelay = 1;
+                     nextGifFrameTime = millis() + tDelay;
+                } else {
+                     nextGifFrameTime = millis();
+                }
+                pendingFileNotification = currentFile; 
+                return; // Success
+            }
         } else {
-             nextGifFrameTime = millis();
+            f.close();
         }
-
-        pendingFileNotification = currentFile; 
-    } else {
-        Serial.printf("Skipping broken GIF: %s\n", currentFile.c_str());
-        loadNextInPlaylist(); // Recursive retry
     }
+    
+    if(Serial) Serial.printf("Skipping broken GIF: %s\n", currentFile.c_str());
+    loadNextInPlaylist(); // Recursive retry
 }
 
 void DisplayManager::_showText(const String& text, bool scroll) {
@@ -604,38 +692,61 @@ void DisplayManager::loop() {
         yield();
     }
     else if (isPlaying && !isStreaming) {
-        
         if (millis() >= nextGifFrameTime) {
             std::lock_guard<std::mutex> gifLk(gifMutex);
-            if (!isPlaying) return; // Check again after lock
+            if (!isPlaying) return;
 
             int tDelay = 0;
-            int result = gif.playFrame(false, &tDelay); // Decode frame, get delay
+            int result = gif.playFrame(false, &tDelay);
             
             if (result == 1) { 
-                // Frame decoded successfully
-                if (tDelay < 10) tDelay = 100; // Enforce min delay for visibility
+                // Frame decoded
+                if (tDelay < 1) tDelay = 1; // Minimum 1ms
                 nextGifFrameTime = millis() + tDelay;
             } 
-            else { 
-                // End of GIF (result == 0) or Error
-                
+            else if (result == 0) { 
+                // End of animation reached
                 unsigned long now = millis();
                 unsigned long elapsed = now - currentGifStartTime;
-                bool timeElapsed = elapsed >= loopDurationMs;
+                
+                // Fail-Safe: If duration is broken/zero, force defaults
+                if (loopDurationMs < 1000) {
+                    if(Serial) Serial.printf("Warning: loopDurationMs was %lu, forcing to 10000\n", loopDurationMs);
+                    loopDurationMs = 10000;
+                }
 
-                if (singleMode) {
-                    gif.reset(); 
-                    nextGifFrameTime = millis() + 10; // Play immediately (with safety delay)
+                if(Serial) Serial.printf("GIF End: elapsed=%lu / %lu ms. Single: %d\n", elapsed, loopDurationMs, singleMode);
+
+                if (singleMode || (elapsed < loopDurationMs)) {
+                    // Loop again
+                    gif.reset();
+                    nextGifFrameTime = millis() + 1;
                 } else {
-                    if (timeElapsed) {
-                        Serial.printf("Time elapsed (%lu >= %lu), Next GIF.\n", elapsed, loopDurationMs);
-                        loadNextInPlaylist();
-                        // loadNextInPlaylist sets nextGifFrameTime, so we don't set it here
-                    } else {
-                        // Loop again
+                    // Time is up, next GIF
+                    if(Serial) Serial.println("Time up. Next GIF.");
+                    loadNextInPlaylist();
+                }
+            }
+            else {
+                // Error (-1)
+                int err = gif.getLastError();
+                // 6 = GIF_EARLY_EOF. Often harmless for looped animations if file is slightly truncated.
+                // If we are supposed to loop (time not up), try to reset instead of skipping.
+                unsigned long now = millis();
+                unsigned long elapsed = now - currentGifStartTime;
+                
+                if (err == 6 && (singleMode || elapsed < loopDurationMs)) {
+                     if(Serial) Serial.printf("GIF Early EOF (6). Looping... (%lu/%lu)\n", elapsed, loopDurationMs);
+                     gif.reset();
+                     nextGifFrameTime = millis() + 50; 
+                }
+                else {
+                    if(Serial) Serial.printf("GIF Decode Error: %d, skipping...\n", err);
+                    if (singleMode) {
                         gif.reset();
-                        nextGifFrameTime = millis() + 10; // Safety delay
+                        nextGifFrameTime = millis() + 2000; // Wait 2s on fatal error
+                    } else {
+                        loadNextInPlaylist();
                     }
                 }
             }

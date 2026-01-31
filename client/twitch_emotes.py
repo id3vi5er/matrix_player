@@ -19,47 +19,74 @@ def load_config():
 
 CONFIG = load_config()
 
-# --- Image Processing (Adapted from main.py) ---
-def process_image_to_bytes(img_src, bg_color=(0,0,0,255)):
+# --- Image Processing ---
+def process_to_gif_bytes(img_src):
     """
-    Converts a PIL Image to raw RGB565 or RGB888 bytes for streaming.
-    The ESP32 expects 64x64 RGB888 (3 bytes per pixel) based on main.py analysis.
+    Converts PIL Image (or sequence) to an optimized 64x64 GIF byte stream.
+    Handles resizing (Fit/Contain), centering, and background.
     """
-    # Create a black background
-    new_bg = Image.new("RGBA", (64, 64), bg_color)
+    frames = []
+    durations = []
     
-    # Resize Logic: Fit (Contain)
-    img = img_src.convert("RGBA")
-    img.thumbnail((64, 64), Image.Resampling.LANCZOS)
-    
-    # Center
-    x = (64 - img.width) // 2
-    y = (64 - img.height) // 2
-    new_bg.paste(img, (x, y), img)
-    
-    # Convert to RGB (Drop Alpha)
-    final_img = new_bg.convert("RGB")
-    return final_img.tobytes()
+    # Check if animated
+    is_animated = getattr(img_src, "is_animated", False)
+    iterator = ImageSequence.Iterator(img_src) if is_animated else [img_src]
 
-class DisplayController:
+    for frame in iterator:
+        # 1. Convert to RGBA
+        rgba = frame.convert("RGBA")
+        
+        # 2. Resize (Fit)
+        rgba.thumbnail((64, 64), Image.Resampling.LANCZOS)
+        
+        # 3. Create Black Background & Center
+        bg = Image.new("RGBA", (64, 64), (0, 0, 0, 255))
+        x = (64 - rgba.width) // 2
+        y = (64 - rgba.height) // 2
+        bg.paste(rgba, (x, y), rgba)
+        
+        # 4. Quantize for GIF (Adaptive Palette)
+        # Dither=None often looks cleaner for pixel art/icons, but ADAPTIVE is good for photos
+        p_img = bg.convert("P", palette=Image.Palette.ADAPTIVE)
+        
+        frames.append(p_img)
+        durations.append(frame.info.get('duration', 100)) # Default 100ms
+
+    # Save to Bytes
+    out = io.BytesIO()
+    if len(frames) > 0:
+        frames[0].save(
+            out, 
+            format='GIF', 
+            save_all=True, 
+            append_images=frames[1:], 
+            duration=durations, 
+            loop=0, 
+            disposal=2
+        )
+    out.seek(0)
+    return out
+
+class MatrixController:
     def __init__(self, ip):
         self.ip = ip
         self.ws_url = f"ws://{ip}/ws"
+        self.upload_url = f"http://{ip}/upload"
         self.ws = None
         self.connected = False
-        self.can_send = True
-        self.image_queue = queue.Queue()
-        self.current_image_bytes = None
-        self.stop_event = threading.Event()
-        self.thread = threading.Thread(target=self._run_loop, daemon=True)
-        
+        self.known_files = set() # Cache of files on ESP32
+        self.thread = threading.Thread(target=self._run_ws, daemon=True)
+        self.ready_event = threading.Event()
+
     def start(self):
         self.thread.start()
+        # Wait for connection and file list
+        print("[Matrix] Connecting...")
+        self.ready_event.wait(timeout=5)
 
-    def _run_loop(self):
-        while not self.stop_event.is_set():
+    def _run_ws(self):
+        while True:
             try:
-                print(f"[Display] Connecting to {self.ws_url}...")
                 self.ws = websocket.WebSocketApp(
                     self.ws_url,
                     on_open=self._on_open,
@@ -68,202 +95,196 @@ class DisplayController:
                     on_close=self._on_close
                 )
                 self.ws.run_forever()
-                time.sleep(2) # Retry delay
-            except Exception as e:
-                print(f"[Display] Connection error: {e}")
+                time.sleep(5)
+            except Exception:
                 time.sleep(5)
 
     def _on_open(self, ws):
-        print("[Display] Connected to ESP32")
+        print("[Matrix] WebSocket Connected")
         self.connected = True
-        # Enable stream mode
-        ws.send(json.dumps({"cmd": "stream"}))
-        self.can_send = True
-        
-        # Start the sender loop in a separate thread/loop check
-        threading.Thread(target=self._stream_sender, daemon=True).start()
+        # Request file list to build cache
+        ws.send(json.dumps({"cmd": "list"}))
 
     def _on_message(self, ws, message):
-        # Check for binary ACK 'K' (0x4B)
-        if isinstance(message, bytes):
-            if len(message) == 1 and message[0] == 0x4B:
-                self.can_send = True
-                # print("ACK")
+        try:
+            data = json.loads(message)
+            cmd = data.get('cmd')
+            
+            if cmd == 'list' or cmd == 'list_end':
+                files = data.get('files', [])
+                for f in files:
+                    self.known_files.add(f)
+                print(f"[Matrix] File list updated. {len(self.known_files)} files known.")
+                self.ready_event.set()
+                
+            elif cmd == 'list_chunk':
+                files = data.get('files', [])
+                for f in files:
+                    self.known_files.add(f)
+                    
+        except:
+            pass
 
     def _on_error(self, ws, error):
-        print(f"[Display] Error: {error}")
+        pass # print(f"[Matrix] WS Error: {error}")
 
-    def _on_close(self, ws, close_status_code, close_msg):
-        print("[Display] Disconnected")
+    def _on_close(self, ws, *args):
         self.connected = False
+        print("[Matrix] Disconnected")
 
-    def _stream_sender(self):
-        """Loop that sends frames when allowed"""
-        last_frame_time = 0
-        while self.connected:
-            if not self.image_queue.empty():
-                # Get new image to show
-                self.current_image_bytes = self.image_queue.get()
-            
-            # Use current image or idle (black/default)
-            data_to_send = self.current_image_bytes
-            
-            if data_to_send and self.can_send:
-                try:
-                    self.ws.send(data_to_send, opcode=websocket.ABNF.OPCODE_BINARY)
-                    self.can_send = False
-                    last_frame_time = time.time()
-                except Exception as e:
-                    print(f"[Display] Send error: {e}")
-                    break
-            
-            # Timeout/Keepalive reset
-            if not self.can_send and (time.time() - last_frame_time > 2.0):
-                self.can_send = True
-            
-            time.sleep(0.01) # Max 100 FPS loop
-
-    def show_image(self, pil_image):
-        """Convert and queue image for display"""
+    def upload_file(self, filename, file_bytes_io):
+        """Uploads a file via HTTP POST"""
+        print(f"[Matrix] Uploading {filename}...")
         try:
-            raw_bytes = process_image_to_bytes(pil_image)
-            # Clear queue to jump to latest
-            with self.image_queue.mutex:
-                self.image_queue.queue.clear()
-            self.image_queue.put(raw_bytes)
+            files = {'file': (filename, file_bytes_io, 'image/gif')}
+            r = requests.post(self.upload_url, files=files, timeout=10)
+            if r.status_code == 200:
+                self.known_files.add(f"/{filename}")
+                return True
+            else:
+                print(f"[Matrix] Upload failed: {r.status_code}")
+                return False
         except Exception as e:
-            print(f"[Display] Error processing image: {e}")
+            print(f"[Matrix] Upload error: {e}")
+            return False
+
+    def play_file(self, filename):
+        """Sends Play command via WebSocket"""
+        if not filename.startswith("/"):
+            filename = "/" + filename
+        
+        if self.connected:
+            self.ws.send(json.dumps({"cmd": "play", "file": filename}))
+            # print(f"[Matrix] Playing {filename}")
+
+    def ensure_and_play(self, filename, image_data):
+        """Checks if file exists, uploads if not, then plays."""
+        target_name = f"/{filename}"
+        if target_name not in self.known_files:
+            # Prepare bytes
+            gif_io = process_to_gif_bytes(image_data)
+            success = self.upload_file(filename, gif_io)
+            if not success:
+                return
+        
+        self.play_file(filename)
 
 class TwitchBot:
-    def __init__(self, channel, token, username, display_controller):
+    def __init__(self, channel, token, username, matrix_controller):
         self.channel = channel
         self.token = token
         self.username = username
-        self.display = display_controller
+        self.matrix = matrix_controller
         self.ws_url = "wss://irc-ws.chat.twitch.tv:443"
-        self.ws = None
         self.last_emote_time = 0
+        self.idle_timer = None
 
     def start(self):
-        # websocket.enableTrace(True)
-        self.ws = websocket.WebSocketApp(
+        # Initial Idle
+        self._show_idle()
+        
+        ws = websocket.WebSocketApp(
             self.ws_url,
             on_open=self._on_open,
             on_message=self._on_message,
-            on_error=self._on_error,
-            on_close=self._on_close
+            on_error=self._on_error
         )
-        self.ws.run_forever()
+        ws.run_forever()
 
     def _on_open(self, ws):
-        print(f"[Twitch] Connecting to #{self.channel}...")
+        print(f"[Twitch] Connected. Joining #{self.channel}...")
         ws.send(f"PASS {self.token}")
         ws.send(f"NICK {self.username}")
         ws.send("CAP REQ :twitch.tv/tags twitch.tv/commands")
         ws.send(f"JOIN #{self.channel.lower()}")
 
     def _on_message(self, ws, message):
-        # Handle PING
         if message.startswith("PING"):
             ws.send("PONG :tmi.twitch.tv")
             return
 
-        try:
-            # Parse tags
-            if "PRIVMSG" in message:
-                self._handle_chat(message)
-        except Exception as e:
-            print(f"[Twitch] Parse error: {e}")
+        if "PRIVMSG" in message:
+            self._handle_chat(message)
 
     def _handle_chat(self, raw_msg):
-        # Example format:
-        # @badge-info=...;emotes=25:0-4,12-16/1902:6-10;... :user!user@... PRIVMSG #channel :Kappa Keepo
-        
+        # Parse for Emotes
         parts = raw_msg.split(" ", 1)
-        if len(parts) < 2: return
-        
-        tags_str = parts[0]
-        if not tags_str.startswith("@"): return # Should not happen with CAP REQ tags
+        if len(parts) < 2 or not parts[0].startswith("@"): return
         
         tags = {}
-        for tag in tags_str[1:].split(";"):
+        for tag in parts[0][1:].split(";"):
             if "=" in tag:
                 k, v = tag.split("=", 1)
                 tags[k] = v
         
         emotes_str = tags.get("emotes")
         if emotes_str:
-            # "25:0-4,12-16/1902:6-10"
-            # Get the first emote ID found
+            # Get first emote ID
             emote_id = emotes_str.split("/")[0].split(":")[0]
-            print(f"[Twitch] Emote detected! ID: {emote_id}")
-            self._fetch_and_display_emote(emote_id)
+            print(f"[Twitch] Emote detected: {emote_id}")
+            self._process_emote(emote_id)
 
-    def _fetch_and_display_emote(self, emote_id):
-        # Fetch image
+    def _process_emote(self, emote_id):
+        self.last_emote_time = time.time()
+        
+        # 1. Check if we have it on the Matrix already
+        filename = f"t_{emote_id}.gif"
+        if f"/{filename}" in self.matrix.known_files:
+            print(f"[System] Cached: {filename}")
+            self.matrix.play_file(filename)
+            self._reset_timer()
+            return
+
+        # 2. If not, fetch and upload
         url = f"https://static-cdn.jtvnw.net/emoticons/v2/{emote_id}/default/dark/3.0"
         try:
-            r = requests.get(url, timeout=2)
+            r = requests.get(url, timeout=3)
             if r.status_code == 200:
                 img = Image.open(io.BytesIO(r.content))
-                print(f"[System] Displaying emote {emote_id}")
-                self.display.show_image(img)
-                self.last_emote_time = time.time()
-                
-                # Reset to idle after X seconds (handled by a timer or checking timestamp in loop)
-                threading.Timer(CONFIG.get("show_duration", 3.0), self._check_reset).start()
-            else:
-                print(f"[System] Failed to download emote: {r.status_code}")
+                self.matrix.ensure_and_play(filename, img)
+                self._reset_timer()
         except Exception as e:
-            print(f"[System] Download error: {e}")
+            print(f"[System] Download failed: {e}")
 
-    def _check_reset(self):
-        # If no new emote has been shown in the last X seconds, show idle
-        if time.time() - self.last_emote_time >= CONFIG.get("show_duration", 3.0):
-            self._show_idle()
+    def _reset_timer(self):
+        if self.idle_timer:
+            self.idle_timer.cancel()
+        
+        duration = CONFIG.get("show_duration", 3.0)
+        self.idle_timer = threading.Timer(duration, self._show_idle)
+        self.idle_timer.start()
 
     def _show_idle(self):
-        idle_path = CONFIG.get("idle_image", "idle.png")
-        if os.path.exists(idle_path):
-            try:
-                img = Image.open(idle_path)
-                self.display.show_image(img)
-            except:
-                pass
+        idle_name = CONFIG.get("idle_image", "idle.png")
+        
+        # Try to find local file to upload if missing on ESP
+        local_path = idle_name
+        if os.path.exists(local_path):
+            img = Image.open(local_path)
+            self.matrix.ensure_and_play(idle_name, img)
         else:
-            # Create a default black image if idle missing
-            img = Image.new("RGB", (64, 64), (0,0,0))
-            self.display.show_image(img)
+            # Just try to play it, maybe it's already there
+            self.matrix.play_file(idle_name)
 
     def _on_error(self, ws, error):
         print(f"[Twitch] Error: {error}")
 
-    def _on_close(self, ws, *args):
-        print("[Twitch] Connection closed")
-
 if __name__ == "__main__":
-    # Validate config
     if CONFIG["twitch_channel"] == "YOUR_CHANNEL_NAME":
-        print("Please configure 'config.json' with your Twitch details.")
+        print("Please configure 'config.json'.")
         sys.exit(0)
 
-    # 1. Start Display Controller
-    display = DisplayController(CONFIG["esp32_ip"])
-    display.start()
+    matrix = MatrixController(CONFIG["esp32_ip"])
+    matrix.start()
 
-    # 2. Start Twitch Bot
     bot = TwitchBot(
         CONFIG["twitch_channel"], 
         CONFIG["twitch_oauth_token"], 
         CONFIG["twitch_username"], 
-        display
+        matrix
     )
-    
-    # Show initial idle
-    bot._show_idle()
     
     try:
         bot.start()
     except KeyboardInterrupt:
-        print("Exiting...")
         sys.exit(0)

@@ -158,13 +158,15 @@ def process_image_to_bytes(img_src, settings, mode="upload"):
             rgba = ImageOps.fit(rgba, (64, 64), method=res_mode, centering=centering)
         
         # 2. Background
-        if not keep_trans:
-            bg = Image.new("RGBA", (64, 64), bg_color)
-            bg.paste(rgba, (0, 0), rgba)
-            rgba = bg
+        # Force solid background for matrix compatibility (fix for Decode Error 8)
+        # if not keep_trans: # Always do this now for stability
+        bg = Image.new("RGBA", (64, 64), bg_color)
+        bg.paste(rgba, (0, 0), rgba)
+        rgba = bg
         
         # 3. Output Format
         if mode == "upload":
+            # Dithering is okay, but transparency is risky.
             return rgba.convert("P", palette=Image.Palette.ADAPTIVE, dither=dither_mode)
         else:
             return rgba.convert("RGB")
@@ -175,16 +177,72 @@ def process_image_to_bytes(img_src, settings, mode="upload"):
         return io.BytesIO(proc_frame(frame).tobytes())
 
     # Upload Mode: Collect frames and save as GIF
+    # Strategy: Use Global Palette from the first frame (or representative frame) to ensure stability.
+    processed_frames = []
+    
+    # 1. Extract frames as RGBA first
+    raw_frames = []
     if is_animated:
         for frame in ImageSequence.Iterator(img_src):
-            frames.append(proc_frame(frame))
+            # Render frame onto background (flatten)
+            bg = Image.new("RGBA", (64, 64), bg_color)
+            
+            # Helper to resize/center 'frame' similar to proc_frame but returning RGBA
+            rgba = frame.convert("RGBA")
+            if scale_mode == 0: rgba = rgba.resize((64, 64), res_mode)
+            elif scale_mode == 1: 
+                rgba.thumbnail((64, 64), res_mode)
+                x = (64 - rgba.width) // 2
+                y = (64 - rgba.height) // 2
+                bg.paste(rgba, (x, y))
+                rgba = bg
+            elif scale_mode == 2: rgba = ImageOps.fit(rgba, (64, 64), method=res_mode, centering=centering)
+            
+            # Apply background if not already handled
+            if scale_mode != 1: # For stretch/fill, we might still need bg if transparency exists
+                 final_bg = Image.new("RGBA", (64, 64), bg_color)
+                 final_bg.paste(rgba, (0, 0), rgba)
+                 rgba = final_bg
+            
+            raw_frames.append(rgba)
             durations.append(frame.info.get('duration', 100))
     else:
-        frames.append(proc_frame(img_src))
+        # Single frame logic (reused from above mostly)
+        rgba = img_src.convert("RGBA")
+        # ... (simplified resize logic for single frame, same as loop essentially)
+        # Just calling proc_frame RGBA variant would be cleaner but let's inline for safety now
+        if scale_mode == 0: rgba = rgba.resize((64, 64), res_mode)
+        elif scale_mode == 1: 
+            rgba.thumbnail((64, 64), res_mode)
+            bg = Image.new("RGBA", (64, 64), bg_color)
+            x = (64 - rgba.width) // 2
+            y = (64 - rgba.height) // 2
+            bg.paste(rgba, (x, y))
+            rgba = bg
+        elif scale_mode == 2: rgba = ImageOps.fit(rgba, (64, 64), method=res_mode, centering=centering)
+        
+        final_bg = Image.new("RGBA", (64, 64), bg_color)
+        final_bg.paste(rgba, (0, 0), rgba)
+        raw_frames.append(final_bg)
         durations.append(200)
 
+    # 2. Generate Palette from the first frame (or all frames if we wanted to be fancy)
+    # Using the first frame's palette is standard and safe.
+    # We convert the first frame to P to generate the palette.
+    base_frame = raw_frames[0].convert("P", palette=Image.Palette.ADAPTIVE, colors=255, dither=dither_mode)
+    
+    # 3. Apply this palette to all frames
+    final_frames = []
+    for raw in raw_frames:
+        # quantize() allows applying an existing palette (from base_frame) to a new image
+        # dither=1 means use dithering
+        dither_opt = 1 if dither_mode != Image.Dither.NONE else 0
+        # Convert RGBA to RGB first (Alpha is already flattened onto BG)
+        p_frame = raw.convert("RGB").quantize(palette=base_frame, dither=dither_opt)
+        final_frames.append(p_frame)
+
     out = io.BytesIO()
-    frames[0].save(out, format='GIF', save_all=True, append_images=frames[1:], duration=durations, loop=0, disposal=2)
+    final_frames[0].save(out, format='GIF', save_all=True, append_images=final_frames[1:], duration=durations, loop=0, disposal=2, optimize=False)
     out.seek(0)
     return out
 
@@ -1304,6 +1362,11 @@ class MatrixApp(QMainWindow):
 
                     filename = path.replace("\\", "/").split("/")[-1].split(".")[0] + ".gif"
                     
+                    output_io.seek(0) # Ensure we start from beginning
+                    data_len = len(output_io.getbuffer())
+                    print(f"Uploading {filename}: {data_len} bytes")
+                    output_io.seek(0)
+
                     url = f"http://{self.ip_input.text()}/upload"
                     headers = {"X-Playlist": settings['playlist']}
                     files = {'file': (filename, output_io, 'image/gif')}
