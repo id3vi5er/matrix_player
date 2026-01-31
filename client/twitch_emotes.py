@@ -75,14 +75,73 @@ class MatrixController:
         self.ws = None
         self.connected = False
         self.known_files = set() # Cache of files on ESP32
-        self.thread = threading.Thread(target=self._run_ws, daemon=True)
+        
+        self.ws_thread = threading.Thread(target=self._run_ws, daemon=True)
         self.ready_event = threading.Event()
+        
+        # Emote Queue to prevent upload flooding
+        self.emote_queue = queue.Queue()
+        self.worker_thread = threading.Thread(target=self._process_queue, daemon=True)
+        self.last_play_time = 0
 
     def start(self):
-        self.thread.start()
-        # Wait for connection and file list
+        self.ws_thread.start()
+        self.worker_thread.start()
+        
         print("[Matrix] Connecting...")
         self.ready_event.wait(timeout=5)
+
+    def _process_queue(self):
+        while True:
+            try:
+                # Wait for next emote (blocking)
+                emote_data = self.emote_queue.get()
+                emote_id = emote_data['id']
+                
+                # Check if we should play idle instead? No, idle is handled by TwitchBot timer.
+                
+                self._handle_single_emote(emote_id)
+                
+                # Minimum display time per emote (prevent skipping too fast)
+                time.sleep(2.0) 
+                
+                self.emote_queue.task_done()
+            except Exception as e:
+                print(f"[Matrix] Worker Error: {e}")
+
+    def queue_emote(self, emote_id):
+        self.emote_queue.put({'id': emote_id, 'time': time.time()})
+
+    def _handle_single_emote(self, emote_id):
+        filename = f"t_{emote_id}.gif"
+        target_path = f"/twitch/{filename}"
+        
+        # 1. Check Cache
+        if target_path in self.known_files:
+            print(f"[System] Playing cached: {filename}")
+            self.play_file(target_path)
+            return
+
+        # 2. Download & Upload
+        print(f"[System] Processing new emote: {emote_id}")
+        url = f"https://static-cdn.jtvnw.net/emoticons/v2/{emote_id}/default/dark/3.0"
+        try:
+            r = requests.get(url, timeout=3)
+            if r.status_code == 200:
+                img = Image.open(io.BytesIO(r.content))
+                
+                # Convert
+                gif_io = process_to_gif_bytes(img)
+                
+                # Upload with retry
+                if self.upload_file(filename, gif_io):
+                    self.play_file(target_path)
+                else:
+                    print(f"[System] Upload failed for {filename}")
+            else:
+                print(f"[System] Failed to download from Twitch: {r.status_code}")
+        except Exception as e:
+            print(f"[System] Error handling emote: {e}")
 
     def _run_ws(self):
         while True:
@@ -102,31 +161,30 @@ class MatrixController:
     def _on_open(self, ws):
         print("[Matrix] WebSocket Connected")
         self.connected = True
-        # Request file list to build cache
         ws.send(json.dumps({"cmd": "list"}))
 
     def _on_message(self, ws, message):
         try:
             data = json.loads(message)
             cmd = data.get('cmd')
-            
+
             if cmd == 'list' or cmd == 'list_end':
                 files = data.get('files', [])
                 for f in files:
                     self.known_files.add(f)
                 print(f"[Matrix] File list updated. {len(self.known_files)} files known.")
                 self.ready_event.set()
-                
+
             elif cmd == 'list_chunk':
                 files = data.get('files', [])
                 for f in files:
                     self.known_files.add(f)
-                    
+
         except:
             pass
 
     def _on_error(self, ws, error):
-        pass # print(f"[Matrix] WS Error: {error}")
+        pass 
 
     def _on_close(self, ws, *args):
         self.connected = False
@@ -136,11 +194,11 @@ class MatrixController:
         """Uploads a file via HTTP POST"""
         print(f"[Matrix] Uploading {filename} to /twitch/...")
         try:
-            # We use the X-Playlist header to tell the ESP32 to put this in the /twitch folder
             headers = {"X-Playlist": "twitch"}
             files = {'file': (filename, file_bytes_io, 'image/gif')}
             
-            r = requests.post(self.upload_url, files=files, headers=headers, timeout=10)
+            # Increased timeout for stability
+            r = requests.post(self.upload_url, files=files, headers=headers, timeout=20)
             if r.status_code == 200:
                 self.known_files.add(f"/twitch/{filename}")
                 return True
@@ -152,8 +210,6 @@ class MatrixController:
             return False
 
     def play_file(self, filename):
-        """Sends Play command via WebSocket"""
-        # Ensure path starts with /twitch/ if it's an emote, or is fully qualified
         if not filename.startswith("/"):
             if not filename.startswith("twitch/"):
                 filename = "/twitch/" + filename
@@ -162,22 +218,17 @@ class MatrixController:
         
         if self.connected:
             self.ws.send(json.dumps({"cmd": "play", "file": filename}))
-            # print(f"[Matrix] Playing {filename}")
 
     def ensure_and_play(self, filename, image_data):
-        """Checks if file exists in /twitch/, uploads if not, then plays."""
-        # Filename should be just the name, e.g. "t_123.gif"
+        # Legacy/Direct method - redirects to queue logic or handles idle
+        # For idle image, we might want direct upload if not exists
         target_path = f"/twitch/{filename}"
-        
         if target_path not in self.known_files:
-            # Prepare bytes (Animated GIF support is inside process_to_gif_bytes)
-            gif_io = process_to_gif_bytes(image_data)
-            success = self.upload_file(filename, gif_io)
-            if not success:
-                return
-        
-        self.play_file(target_path)
-
+             gif_io = process_to_gif_bytes(image_data)
+             if self.upload_file(filename, gif_io):
+                 self.play_file(target_path)
+        else:
+             self.play_file(target_path)
 class TwitchBot:
     def __init__(self, channel, token, username, matrix_controller):
         self.channel = channel
@@ -228,32 +279,20 @@ class TwitchBot:
         
         emotes_str = tags.get("emotes")
         if emotes_str:
-            # Get first emote ID
-            emote_id = emotes_str.split("/")[0].split(":")[0]
-            print(f"[Twitch] Emote detected: {emote_id}")
-            self._process_emote(emote_id)
+            # The emotes tag format is: id:start-end,start-end/id:start-end
+            # We split by / to get each emote type
+            emote_groups = emotes_str.split("/")
+            for group in emote_groups:
+                if ":" in group:
+                    emote_id = group.split(":")[0]
+                    print(f"[Twitch] Emote detected: {emote_id}")
+                    self._process_emote(emote_id)
 
     def _process_emote(self, emote_id):
         self.last_emote_time = time.time()
-        
-        # 1. Check if we have it on the Matrix already
-        filename = f"t_{emote_id}.gif"
-        if f"/{filename}" in self.matrix.known_files:
-            print(f"[System] Cached: {filename}")
-            self.matrix.play_file(filename)
-            self._reset_timer()
-            return
-
-        # 2. If not, fetch and upload
-        url = f"https://static-cdn.jtvnw.net/emoticons/v2/{emote_id}/default/dark/3.0"
-        try:
-            r = requests.get(url, timeout=3)
-            if r.status_code == 200:
-                img = Image.open(io.BytesIO(r.content))
-                self.matrix.ensure_and_play(filename, img)
-                self._reset_timer()
-        except Exception as e:
-            print(f"[System] Download failed: {e}")
+        print(f"[Twitch] Queued: {emote_id}")
+        self.matrix.queue_emote(emote_id)
+        self._reset_timer()
 
     def _reset_timer(self):
         if self.idle_timer:
