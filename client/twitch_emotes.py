@@ -92,6 +92,11 @@ class MatrixController:
         self.ready_event.wait(timeout=5)
 
     def _process_queue(self):
+        # Wait until file list is fully loaded to avoid duplicate uploads
+        print("[Matrix] Worker waiting for file list...")
+        self.ready_event.wait()
+        print("[Matrix] Worker ready. Processing queue.")
+        
         while True:
             try:
                 # Wait for next emote (blocking)
@@ -298,6 +303,10 @@ class TwitchBot:
         if self.idle_timer:
             self.idle_timer.cancel()
         
+        # If enabled, disable the idle timeout -> Last emote stays forever
+        if CONFIG.get("always_show_last_emote", False):
+            return
+
         duration = CONFIG.get("show_duration", 3.0)
         self.idle_timer = threading.Timer(duration, self._show_idle)
         self.idle_timer.start()

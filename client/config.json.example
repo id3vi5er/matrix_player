@@ -4,5 +4,6 @@
     "twitch_oauth_token": "oauth:YOUR_TOKEN_HERE",
     "twitch_username": "YOUR_BOT_USERNAME",
     "show_duration": 3.0,
+    "always_show_last_emote": false,
     "idle_image": "idle.png"
 }
