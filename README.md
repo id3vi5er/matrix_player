@@ -26,6 +26,7 @@ A standalone GUI application (`client/twitch_emotes.py`) connects your matrix to
 *   **Emote Support:** Displays native Twitch, **7TV**, **FrankerFaceZ (FFZ)**, and **BetterTTV (BTTV)** emotes automatically.
 *   **GUI Control:** Live preview of events, brightness control, and manual playlist override.
 *   **Rolling Storage:** Automatic space management (LRU). Define a cleanup threshold (e.g., 80%) and target (e.g., 50%) to delete old emotes when space runs low.
+*   **Pixel Game (r/place):** Activate the "Pixel Game" to turn your matrix into a shared canvas. Users can paint pixels using `!px <x> <y> <color>` (e.g., `!px 32 32 red`).
 *   **Smart Caching:** Downloads emotes once and caches them on the ESP32 (in `/twitch/` folder) to save bandwidth. Auto-refreshes storage stats.
 *   **Customization:** Adjust display duration and idle behavior directly in the app.
 *   **Setup:** Copy `client/config.json.example` to `client/config.json` and enter your credentials.

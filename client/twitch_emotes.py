@@ -11,11 +11,11 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QLineEdit, QPushButton, QLabel, QSlider, QGroupBox, QTextEdit, 
                              QMessageBox, QProgressBar, QComboBox, QCheckBox, QDoubleSpinBox,
                              QListWidget, QListWidgetItem, QMenu, QTabWidget, QDialog)
-from PyQt6.QtGui import QFont, QColor, QPixmap, QIcon
+from PyQt6.QtGui import QFont, QColor, QPixmap, QIcon, QImage
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QThread, QSize, QTimer
 import websocket
 
-# --- Global Config Loader ---
+# --- Pixel Canvas Logic ---
 def load_config():
     if os.path.exists("config.json"):
         with open("config.json", "r") as f:
@@ -117,6 +117,78 @@ def process_to_gif_bytes(img_src):
     out.seek(0)
     return out
 
+# --- Pixel Canvas Logic ---
+COLOR_MAP = {
+    "red": (255, 0, 0), "rot": (255, 0, 0),
+    "green": (0, 255, 0), "grün": (0, 255, 0),
+    "blue": (0, 0, 255), "blau": (0, 0, 255),
+    "black": (0, 0, 0), "schwarz": (0, 0, 0),
+    "white": (255, 255, 255), "weiß": (255, 255, 255),
+    "yellow": (255, 255, 0), "gelb": (255, 255, 0),
+    "cyan": (0, 255, 255), "türkis": (0, 255, 255),
+    "magenta": (255, 0, 255), "pink": (255, 0, 255),
+    "orange": (255, 165, 0), "purple": (128, 0, 128), "lila": (128, 0, 128),
+    "gray": (128, 128, 128), "grau": (128, 128, 128)
+}
+
+class PixelCanvas:
+    def __init__(self, filename="canvas.png"):
+        self.filename = filename
+        self.width = 64
+        self.height = 64
+        self.is_dirty = False
+        self.image = Image.new("RGB", (self.width, self.height), (0, 0, 0))
+        self.load()
+
+    def load(self):
+        if os.path.exists(self.filename):
+            try:
+                loaded = Image.open(self.filename)
+                if loaded.size == (self.width, self.height):
+                    self.image = loaded.convert("RGB")
+            except Exception as e:
+                print(f"Error loading canvas: {e}")
+
+    def save(self):
+        try:
+            self.image.save(self.filename)
+        except Exception as e:
+            print(f"Error saving canvas: {e}")
+
+    def set_pixel(self, x, y, color_val):
+        # x, y are 1-based from chat -> convert to 0-based
+        ix = x - 1
+        iy = y - 1
+        
+        if not (0 <= ix < self.width and 0 <= iy < self.height):
+            return False
+
+        # Parse Color
+        rgb = None
+        color_val = color_val.lower()
+        
+        if color_val in COLOR_MAP:
+            rgb = COLOR_MAP[color_val]
+        elif color_val.startswith("#") or len(color_val) == 6:
+            try:
+                c = color_val.lstrip("#")
+                rgb = tuple(int(c[i:i+2], 16) for i in (0, 2, 4))
+            except:
+                pass
+        
+        if rgb:
+            current = self.image.getpixel((ix, iy))
+            if current != rgb:
+                self.image.putpixel((ix, iy), rgb)
+                self.is_dirty = True
+                return True
+        return False
+
+    def reset(self):
+        self.image = Image.new("RGB", (self.width, self.height), (0, 0, 0))
+        self.is_dirty = True
+        self.save()
+
 # --- Logic Classes (adapted for GUI) ---
 
 class ImageLoader(QThread):
@@ -144,6 +216,7 @@ class WorkerSignals(QObject):
     storage_update = pyqtSignal(int, int) # total, used
     playlists_update = pyqtSignal(list)
     emote_received = pyqtSignal(str, str, str) # name, type, id/url
+    canvas_updated = pyqtSignal()
 
 class MatrixController:
     def __init__(self, ip, signals):
@@ -205,6 +278,8 @@ class MatrixController:
                 
                 if emote_type == 'idle':
                     self._handle_idle()
+                elif emote_type == 'canvas':
+                    self._handle_canvas_idle()
                 elif emote_type == 'custom':
                     self._handle_custom_emote(emote_data['name'], emote_data['url'])
                 else:
@@ -224,7 +299,9 @@ class MatrixController:
         self.emote_queue.put({'type': 'custom', 'name': name, 'url': url, 'time': time.time()})
 
     def queue_idle(self):
-        self.emote_queue.put({'type': 'idle', 'id': "__IDLE__", 'time': time.time()})
+        # Determine if we should show canvas or standard idle
+        mode = 'canvas' if CONFIG.get("canvas_enabled", False) else 'idle'
+        self.emote_queue.put({'type': mode, 'id': "__IDLE__", 'time': time.time()})
 
     def _handle_custom_emote(self, name, url):
         safe_name = "".join(x for x in name if x.isalnum())
@@ -283,6 +360,10 @@ class MatrixController:
                 self.signals.log.emit(f"Error showing idle: {e}")
         else:
             self.play_file("/twitch/idle.gif")
+
+    def _handle_canvas_idle(self):
+        # Just play the place.gif file. The Bot thread handles uploading it if dirty.
+        self.play_file("/twitch/place.gif")
 
     def _handle_single_emote(self, emote_id):
         filename = f"t_{emote_id}.gif"
@@ -507,6 +588,10 @@ class TwitchBot:
         self.running = False
         self.thread = None
         self.custom_emotes = {} # Code -> URL (FFZ & 7TV)
+        
+        # Pixel Canvas
+        self.canvas = PixelCanvas()
+        self.canvas_timer = None
 
     def update_credentials(self, channel, token, username):
         self.channel = channel
@@ -525,6 +610,11 @@ class TwitchBot:
         
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
+        
+        # Start Canvas Update Loop
+        self.canvas_timer = threading.Thread(target=self._run_canvas_loop, daemon=True)
+        self.canvas_timer.start()
+
         # Initial Idle - Queued to avoid blocking UI
         self.matrix.queue_idle()
 
@@ -694,7 +784,22 @@ class TwitchBot:
             on_error=self._on_error,
             on_close=self._on_close
         )
-        self.ws.run_forever()
+    def _run_canvas_loop(self):
+        while self.running:
+            if CONFIG.get("canvas_enabled", False) and self.canvas.is_dirty:
+                self.canvas.save() # Persist
+                
+                # Upload to ESP
+                try:
+                    # Convert to GIF bytes
+                    gif_io = process_to_gif_bytes(self.canvas.image)
+                    if self.matrix.upload_file("place.gif", gif_io):
+                        self.canvas.is_dirty = False
+                        self.signals.canvas_updated.emit() # Notify GUI
+                except Exception as e:
+                    self.signals.log.emit(f"[Canvas] Upload Error: {e}")
+            
+            time.sleep(2.0) # Check every 2 seconds
 
     def _on_open(self, ws):
         self.signals.log.emit(f"[Twitch] Connected. Joining #{self.channel}...")
@@ -737,6 +842,22 @@ class TwitchBot:
             msg_content = raw_msg.split("PRIVMSG", 1)[1].split(":", 1)[1].strip()
         except:
             return
+
+        # 0. Canvas Command (!px x y color)
+        if CONFIG.get("canvas_enabled", False) and msg_content.startswith("!px"):
+            parts = msg_content.split()
+            if len(parts) >= 4:
+                try:
+                    x = int(parts[1])
+                    y = int(parts[2])
+                    color = parts[3]
+                    if self.canvas.set_pixel(x, y, color):
+                        # self.signals.log.emit(f"[Canvas] Pixel {x},{y} set to {color}")
+                        pass
+                except:
+                    pass
+            return # Don't process as emote if it's a command? Or allow both? 
+                   # Usually commands shouldn't trigger emotes unless we want to.
 
         # 1. Native Twitch Emotes (via Tags)
         emotes_str = tags.get("emotes")
@@ -789,9 +910,11 @@ class TwitchBot:
         if self.idle_timer:
             self.idle_timer.cancel()
         
-        # Dynamic check from CONFIG (which is updated by GUI)
-        if CONFIG.get("always_show_last_emote", False):
-            return
+        # If Canvas is enabled, we IGNORE "always_show_last_emote" and ALWAYS return to canvas
+        if not CONFIG.get("canvas_enabled", False):
+            # Dynamic check from CONFIG (which is updated by GUI)
+            if CONFIG.get("always_show_last_emote", False):
+                return
 
         duration = CONFIG.get("show_duration", 3.0)
         self.idle_timer = threading.Timer(duration, self._show_idle)
@@ -883,6 +1006,7 @@ class TwitchGui(QMainWindow):
         self.signals.storage_update.connect(self.update_storage)
         self.signals.playlists_update.connect(self.update_playlists)
         self.signals.emote_received.connect(self.add_emote_to_history)
+        self.signals.canvas_updated.connect(self.update_canvas_preview)
 
         self.matrix = MatrixController(CONFIG["esp32_ip"], self.signals)
         self.bot = TwitchBot(CONFIG["twitch_channel"], CONFIG["twitch_oauth_token"], CONFIG["twitch_username"], self.matrix, self.signals)
@@ -895,6 +1019,7 @@ class TwitchGui(QMainWindow):
 
         self.init_ui()
         self.matrix.start()
+        self.update_canvas_preview() # Initial preview
         self.start_refresh_timer()
         # Auto-connect disabled per user request
         # if self.bot.token and self.bot.channel:
@@ -1004,6 +1129,35 @@ class TwitchGui(QMainWindow):
 
         gb_storage.setLayout(l_storage)
         layout.addWidget(gb_storage)
+
+        # 2.6 r/place Canvas
+        gb_canvas = QGroupBox("r/place Canvas (!px x y color)")
+        l_canvas = QVBoxLayout()
+        
+        # Preview Label
+        self.lbl_canvas_preview = QLabel()
+        self.lbl_canvas_preview.setFixedSize(128, 128)
+        self.lbl_canvas_preview.setStyleSheet("border: 1px solid #444; background-color: black;")
+        self.lbl_canvas_preview.setScaledContents(True)
+        l_canvas.addWidget(self.lbl_canvas_preview, 0, Qt.AlignmentFlag.AlignCenter)
+
+        self.cb_canvas_enabled = QCheckBox("Enable Pixel Game (Replaces Idle Image)")
+        self.cb_canvas_enabled.setChecked(CONFIG.get("canvas_enabled", False))
+        self.cb_canvas_enabled.toggled.connect(self.update_config_values)
+        l_canvas.addWidget(self.cb_canvas_enabled)
+        
+        h_canv_btn = QHBoxLayout()
+        self.btn_reset_canvas = QPushButton("Reset Canvas")
+        self.btn_reset_canvas.clicked.connect(self.reset_canvas)
+        h_canv_btn.addWidget(self.btn_reset_canvas)
+        
+        self.btn_upload_canvas = QPushButton("Force Upload")
+        self.btn_upload_canvas.clicked.connect(self.force_upload_canvas)
+        h_canv_btn.addWidget(self.btn_upload_canvas)
+        
+        l_canvas.addLayout(h_canv_btn)
+        gb_canvas.setLayout(l_canvas)
+        layout.addWidget(gb_canvas)
 
         # 3. Matrix Control
         gb_matrix = QGroupBox("Matrix Control")
@@ -1146,6 +1300,8 @@ class TwitchGui(QMainWindow):
         new_interval = self.spin_refresh.value()
         CONFIG["storage_refresh_interval"] = new_interval
         
+        CONFIG["canvas_enabled"] = self.cb_canvas_enabled.isChecked()
+
         if old_interval != new_interval:
             self.start_refresh_timer()
             
@@ -1277,6 +1433,26 @@ class TwitchGui(QMainWindow):
         if self.matrix.connected:
             self.matrix.send_cmd("list", {})
             # self.log_msg("[System] Auto-refreshing storage info...") # Optional: Log it
+
+    def update_canvas_preview(self):
+        """Converts PIL canvas to QPixmap and displays it."""
+        try:
+            img = self.bot.canvas.image.convert("RGBA")
+            data = img.tobytes("raw", "RGBA")
+            qimg = QImage(data, img.size[0], img.size[1], QImage.Format.Format_RGBA8888)
+            pix = QPixmap.fromImage(qimg)
+            self.lbl_canvas_preview.setPixmap(pix)
+        except Exception as e:
+            print(f"Error updating canvas preview: {e}")
+
+    def reset_canvas(self):
+        self.bot.canvas.reset()
+        self.update_canvas_preview()
+        self.log_msg("[Canvas] Reset to black.")
+
+    def force_upload_canvas(self):
+        self.bot.canvas.is_dirty = True
+        self.log_msg("[Canvas] Upload queued...")
 
     def closeEvent(self, event):
         """Cleanup threads on exit"""
