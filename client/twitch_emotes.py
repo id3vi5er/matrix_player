@@ -6,7 +6,7 @@ import requests
 import io
 import os
 import queue
-from PIL import Image, ImageSequence, ImageOps
+from PIL import Image, ImageSequence, ImageOps, ImageDraw
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QLineEdit, QPushButton, QLabel, QSlider, QGroupBox, QTextEdit, 
                              QMessageBox, QProgressBar, QComboBox, QCheckBox, QDoubleSpinBox,
@@ -155,6 +155,23 @@ class PixelCanvas:
         except Exception as e:
             print(f"Error saving canvas: {e}")
 
+    def reset(self):
+        self.image = Image.new("RGB", (self.width, self.height), (0, 0, 0))
+        self.is_dirty = True
+        self.save()
+
+    def _parse_color(self, color_val):
+        color_val = color_val.lower()
+        if color_val in COLOR_MAP:
+            return COLOR_MAP[color_val]
+        elif color_val.startswith("#") or len(color_val) == 6:
+            try:
+                c = color_val.lstrip("#")
+                return tuple(int(c[i:i+2], 16) for i in (0, 2, 4))
+            except:
+                pass
+        return None
+
     def set_pixel(self, x, y, color_val):
         # x, y are 1-based from chat -> convert to 0-based
         ix = x - 1
@@ -163,18 +180,7 @@ class PixelCanvas:
         if not (0 <= ix < self.width and 0 <= iy < self.height):
             return False
 
-        # Parse Color
-        rgb = None
-        color_val = color_val.lower()
-        
-        if color_val in COLOR_MAP:
-            rgb = COLOR_MAP[color_val]
-        elif color_val.startswith("#") or len(color_val) == 6:
-            try:
-                c = color_val.lstrip("#")
-                rgb = tuple(int(c[i:i+2], 16) for i in (0, 2, 4))
-            except:
-                pass
+        rgb = self._parse_color(color_val)
         
         if rgb:
             current = self.image.getpixel((ix, iy))
@@ -184,10 +190,32 @@ class PixelCanvas:
                 return True
         return False
 
-    def reset(self):
-        self.image = Image.new("RGB", (self.width, self.height), (0, 0, 0))
+    def draw_line(self, x1, y1, x2, y2, color_val):
+        rgb = self._parse_color(color_val)
+        if not rgb: return False
+        
+        draw = ImageDraw.Draw(self.image)
+        # 1-based adjustment
+        draw.line([(x1-1, y1-1), (x2-1, y2-1)], fill=rgb, width=1)
         self.is_dirty = True
-        self.save()
+        return True
+
+    def draw_circle(self, x, y, r, color_val):
+        rgb = self._parse_color(color_val)
+        if not rgb: return False
+        
+        draw = ImageDraw.Draw(self.image)
+        # Bounding Box: (x-r, y-r) to (x+r, y+r)
+        # 1-based adjustment
+        cx, cy = x-1, y-1
+        left = cx - r
+        top = cy - r
+        right = cx + r
+        bottom = cy + r
+        
+        draw.ellipse([left, top, right, bottom], fill=rgb) # Filled circle
+        self.is_dirty = True
+        return True
 
 # --- Logic Classes (adapted for GUI) ---
 
@@ -803,9 +831,10 @@ class TwitchBot:
                         self.signals.canvas_updated.emit() # Notify GUI
                         
                         # Force refresh on matrix so new pixels are visible immediately
-                        # We only do this if Canvas Mode is enabled (checked above)
-                        # This might interrupt an active emote, but provides live feedback.
-                        self.matrix.play_file("place.gif") 
+                        # BUT only if we are currently in Idle state (no emote timer running)
+                        # If timer is running, _show_idle will pick up the new file automatically when done.
+                        if not self.idle_timer or not self.idle_timer.is_alive():
+                            self.matrix.play_file("place.gif") 
                 except Exception as e:
                     self.signals.log.emit(f"[Canvas] Upload Error: {e}")
             
@@ -853,21 +882,35 @@ class TwitchBot:
         except:
             return
 
-        # 0. Canvas Command (!px x y color)
-        if CONFIG.get("canvas_enabled", False) and msg_content.startswith("!px"):
+        # Canvas Commands
+        if CONFIG.get("canvas_enabled", False):
             parts = msg_content.split()
-            if len(parts) >= 4:
+            if not parts: return
+            cmd = parts[0].lower()
+
+            # !px x y color
+            if cmd == "!px" and len(parts) >= 4:
                 try:
                     x = int(parts[1])
                     y = int(parts[2])
                     color = parts[3]
-                    if self.canvas.set_pixel(x, y, color):
-                        # self.signals.log.emit(f"[Canvas] Pixel {x},{y} set to {color}")
-                        pass
-                except:
-                    pass
-            return # Don't process as emote if it's a command? Or allow both? 
-                   # Usually commands shouldn't trigger emotes unless we want to.
+                    self.canvas.set_pixel(x, y, color)
+                except: pass
+            
+            # !ln x1 y1 x2 y2 color
+            elif cmd == "!ln" and len(parts) >= 6:
+                try:
+                    self.canvas.draw_line(int(parts[1]), int(parts[2]), int(parts[3]), int(parts[4]), parts[5])
+                except: pass
+            
+            # !cr x y r color
+            elif cmd == "!cr" and len(parts) >= 5:
+                try:
+                    self.canvas.draw_circle(int(parts[1]), int(parts[2]), int(parts[3]), parts[4])
+                except: pass
+            
+            if cmd in ["!px", "!ln", "!cr"]:
+                return # Don't process as emote
 
         # 1. Native Twitch Emotes (via Tags)
         emotes_str = tags.get("emotes")
@@ -1141,7 +1184,7 @@ class TwitchGui(QMainWindow):
         layout.addWidget(gb_storage)
 
         # 2.6 r/place Canvas
-        gb_canvas = QGroupBox("r/place Canvas (!px x y color)")
+        gb_canvas = QGroupBox("r/place Canvas (!px, !ln, !cr)")
         l_canvas = QVBoxLayout()
         
         # Preview Label

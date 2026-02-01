@@ -39,7 +39,7 @@ All planned MQTT and Home Assistant features have been successfully implemented.
 ### Interactive Events
 *   [ ] **🔥 Emote-Combo / Hype-Meter:** Detect spam of the same emote (e.g. 10x in 5s) and trigger a special "COMBO!" animation or blink effect.
 *   [ ] **🎰 Emote-Slotmachine:** Chat command `!roll` that cycles through random emotes and stops on one (win/loss mechanic).
-*   [x] **DONE:** **🎨 r/place Pixel-Canvas:** Users set pixels via chat commands (`!px x y color`). The bot maintains a local image and uploads it to the matrix upon changes.
+*   [x] **DONE:** **🎨 r/place Pixel-Canvas:** Users set pixels via chat commands (`!px`, `!ln`, `!cr`). Local persistence, delta-upload, and priority handling implemented.
 
 ### Alerts & Moderation
 *   [ ] **🚨 Raid Welcome:** Detect raids via PubSub/Chat, fetch the raider's profile picture from Twitch API, crop it to circle/square 64x64, and display it with a welcome text.
