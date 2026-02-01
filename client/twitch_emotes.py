@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QMessageBox, QProgressBar, QComboBox, QCheckBox, QDoubleSpinBox,
                              QListWidget, QListWidgetItem, QMenu, QTabWidget, QDialog)
 from PyQt6.QtGui import QFont, QColor, QPixmap, QIcon
-from PyQt6.QtCore import Qt, pyqtSignal, QObject, QThread, QSize
+from PyQt6.QtCore import Qt, pyqtSignal, QObject, QThread, QSize, QTimer
 import websocket
 
 # --- Global Config Loader ---
@@ -21,7 +21,19 @@ def load_config():
         with open("config.json", "r") as f:
             return json.load(f)
     print("Config file not found. Please create config.json based on config.json.example")
-    return {"esp32_ip": "192.168.178.155", "twitch_channel": "", "twitch_oauth_token": "", "twitch_username": "", "show_duration": 3.0, "always_show_last_emote": False, "idle_image": "idle.png"}
+    return {
+        "esp32_ip": "192.168.178.155", 
+        "twitch_channel": "", 
+        "twitch_oauth_token": "", 
+        "twitch_username": "", 
+        "show_duration": 3.0, 
+        "always_show_last_emote": False, 
+        "idle_image": "idle.png", 
+        "storage_refresh_interval": 60,
+        "storage_threshold": 80,
+        "storage_target": 50,
+        "rolling_storage_enabled": True
+    }
 
 def save_config(cfg):
     try:
@@ -142,6 +154,12 @@ class MatrixController:
         self.connected = False
         self.known_files = set() 
         self.signals = signals
+
+        # Metadata for Rolling Storage
+        self.emote_stats = {}  # {"/twitch/foo.gif": {"last_used": timestamp, "size": bytes}}
+        self.total_storage = 0
+        self.used_storage = 0
+        self.is_syncing = False # Block queue during file list sync
         
         self.ws_thread = threading.Thread(target=self._run_ws, daemon=True)
         self.ready_event = threading.Event()
@@ -168,7 +186,21 @@ class MatrixController:
         
         while True:
             try:
-                emote_data = self.emote_queue.get()
+                # Wait if syncing file list
+                if self.is_syncing:
+                    time.sleep(0.1)
+                    continue
+
+                emote_data = self.emote_queue.get(block=False) # Non-blocking get to allow loop check
+                
+                # Rolling Storage Check
+                if CONFIG.get("rolling_storage_enabled", True) and self.total_storage > 0:
+                    threshold = CONFIG.get("storage_threshold", 80) / 100.0
+                    usage_ratio = self.used_storage / self.total_storage
+                    if usage_ratio >= threshold:
+                        self.signals.log.emit(f"[Rolling] Storage at {usage_ratio*100:.0f}%, cleaning up...")
+                        self._cleanup_old_emotes()
+
                 emote_type = emote_data.get('type', 'twitch')
                 
                 if emote_type == 'idle':
@@ -180,6 +212,8 @@ class MatrixController:
                 
                 time.sleep(2.0) 
                 self.emote_queue.task_done()
+            except queue.Empty:
+                time.sleep(0.1)
             except Exception as e:
                 self.signals.log.emit(f"[Matrix] Worker Error: {e}")
 
@@ -302,8 +336,11 @@ class MatrixController:
             data = json.loads(message)
             cmd = data.get('cmd')
             if cmd == 'list_start':
+                self.is_syncing = True
                 total = data.get('total', 0)
                 used = data.get('used', 0)
+                self.total_storage = total
+                self.used_storage = used
                 if total > 0:
                     self.signals.storage_update.emit(total, used)
                 
@@ -313,12 +350,23 @@ class MatrixController:
             
             if cmd == 'list' or cmd == 'list_end' or cmd == 'list_start':
                 files = data.get('files', [])
-                for f in files: self.known_files.add(f)
+                for f in files: 
+                    self.known_files.add(f)
+                    # Initialize stats for existing files if missing
+                    if f.startswith("/twitch/") and f not in self.emote_stats:
+                        self.emote_stats[f] = {"last_used": time.time(), "size": 0}
                 if cmd != 'list_start':
                     self.ready_event.set()
+                
+                if cmd == 'list_end':
+                    self.is_syncing = False
+
             elif cmd == 'list_chunk':
                 files = data.get('files', [])
-                for f in files: self.known_files.add(f)
+                for f in files: 
+                    self.known_files.add(f)
+                    if f.startswith("/twitch/") and f not in self.emote_stats:
+                        self.emote_stats[f] = {"last_used": time.time(), "size": 0}
         except:
             pass
 
@@ -332,11 +380,21 @@ class MatrixController:
 
     def upload_file(self, filename, file_bytes_io):
         try:
+            file_size = file_bytes_io.getbuffer().nbytes
             headers = {"X-Playlist": "twitch"}
             files = {'file': (filename, file_bytes_io, 'image/gif')}
             r = requests.post(self.upload_url, files=files, headers=headers, timeout=20)
             if r.status_code == 200:
-                self.known_files.add(f"/twitch/{filename}")
+                target_path = f"/twitch/{filename}"
+                self.known_files.add(target_path)
+                
+                # Update Stats
+                self.emote_stats[target_path] = {
+                    "last_used": time.time(),
+                    "size": file_size
+                }
+                self.used_storage += file_size # Optimistic update
+
                 return True
             return False
         except Exception as e:
@@ -351,6 +409,13 @@ class MatrixController:
                 filename = "/" + filename
         
         if self.connected:
+            # Update last_used timestamp
+            if filename in self.emote_stats:
+                self.emote_stats[filename]["last_used"] = time.time()
+            elif filename.startswith("/twitch/"):
+                # Initialize new file without size (will be updated on list or upload)
+                self.emote_stats[filename] = {"last_used": time.time(), "size": 0}
+
             self.ws.send(json.dumps({"cmd": "play", "file": filename}))
 
     def send_cmd(self, cmd, payload):
@@ -364,7 +429,60 @@ class MatrixController:
             self.send_cmd("silent_delete_playlist", {"name": "twitch"})
             # Clear local cache of twitch files
             self.known_files = {f for f in self.known_files if not f.startswith("/twitch/") and not f.startswith("twitch/")}
+            self.emote_stats.clear()
             self.signals.log.emit("[System] Cache cleared.")
+
+    def _cleanup_old_emotes(self, space_needed=0):
+        """Deletes oldest emotes until enough space is free."""
+        if not CONFIG.get("rolling_storage_enabled", True):
+            return True
+
+        threshold = CONFIG.get("storage_threshold", 80) / 100.0
+        target = CONFIG.get("storage_target", 50) / 100.0
+
+        if self.total_storage == 0:
+            return False
+
+        usage_ratio = self.used_storage / self.total_storage
+
+        # Check if cleanup is needed
+        if usage_ratio < threshold and space_needed == 0:
+            return True
+
+        target_usage = self.total_storage * target
+        bytes_to_free = self.used_storage - target_usage
+        if space_needed > 0:
+            bytes_to_free = max(bytes_to_free, space_needed)
+
+        if bytes_to_free <= 0:
+            return True
+
+        # Sort by last_used (oldest first)
+        twitch_files = [(f, s) for f, s in self.emote_stats.items()
+                        if f.startswith("/twitch/") and f != "/twitch/idle.gif"]
+        twitch_files.sort(key=lambda x: x[1].get("last_used", 0))
+
+        freed = 0
+        files_to_delete = []
+
+        for filepath, stats in twitch_files:
+            if freed >= bytes_to_free:
+                break
+            files_to_delete.append(filepath)
+            freed += stats.get("size", 5000) # Fallback 5KB
+
+        # Delete files
+        for filepath in files_to_delete:
+            self.signals.log.emit(f"[Rolling] Deleting: {filepath}")
+            self.send_cmd("delete", {"file": filepath})
+            self.known_files.discard(filepath)
+            if filepath in self.emote_stats:
+                self.used_storage -= self.emote_stats[filepath].get("size", 0)
+                del self.emote_stats[filepath]
+            time.sleep(0.05) # Yield
+
+        self.signals.log.emit(f"[Rolling] Freed ~{freed / 1024:.1f} KB")
+        return True
 
     def ensure_and_play(self, filename, image_data):
         target_path = f"/twitch/{filename}"
@@ -771,14 +889,16 @@ class TwitchGui(QMainWindow):
 
         self.image_cache = {} # URL -> QPixmap
         self.active_loaders = []
+        
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.timeout.connect(self.refresh_storage_info)
 
         self.init_ui()
         self.matrix.start()
-        # Don't auto-start bot here, let the UI button handle it if needed, or stick to auto-start but sync button text
-        if self.bot.token and self.bot.channel:
-            self.bot.start()
-            # We will update button text in init_ui or right after showing
-
+        self.start_refresh_timer()
+        # Auto-connect disabled per user request
+        # if self.bot.token and self.bot.channel:
+        #     self.bot.start()
 
     def init_ui(self):
         central = QWidget()
@@ -793,8 +913,6 @@ class TwitchGui(QMainWindow):
         h_chan.addWidget(QLabel("Channel:"))
         self.txt_channel = QLineEdit(CONFIG["twitch_channel"])
         self.btn_connect = QPushButton("Connect")
-        if self.bot.running:
-             self.btn_connect.setText("Disconnect")
         self.btn_connect.clicked.connect(self.toggle_connection)
         h_chan.addWidget(self.txt_channel)
         h_chan.addWidget(self.btn_connect)
@@ -832,6 +950,61 @@ class TwitchGui(QMainWindow):
         gb_behav.setLayout(l_behav)
         layout.addWidget(gb_behav)
 
+        # 2.5 Rolling Storage Settings
+        gb_storage = QGroupBox("Rolling Storage")
+        l_storage = QVBoxLayout()
+
+        # Storage Bar (Moved from Matrix Control)
+        self.storage_bar = QProgressBar()
+        self.storage_bar.setValue(0)
+        self.storage_bar.setFormat("Storage: ? / ? MB")
+        l_storage.addWidget(self.storage_bar)
+
+        # Threshold Slider (when to start cleanup)
+        h_threshold = QHBoxLayout()
+        h_threshold.addWidget(QLabel("Cleanup Start:"))
+        self.slider_threshold = QSlider(Qt.Orientation.Horizontal)
+        self.slider_threshold.setRange(50, 95)  # 50% - 95%
+        self.slider_threshold.setValue(CONFIG.get("storage_threshold", 80))
+        self.lbl_threshold = QLabel(f"{self.slider_threshold.value()}%")
+        self.slider_threshold.valueChanged.connect(self.update_storage_labels)
+        self.slider_threshold.valueChanged.connect(self.update_config_values)
+        h_threshold.addWidget(self.slider_threshold)
+        h_threshold.addWidget(self.lbl_threshold)
+        l_storage.addLayout(h_threshold)
+
+        # Target Slider (cleanup target level)
+        h_target = QHBoxLayout()
+        h_target.addWidget(QLabel("Cleanup Target:"))
+        self.slider_target = QSlider(Qt.Orientation.Horizontal)
+        self.slider_target.setRange(20, 70)  # 20% - 70%
+        self.slider_target.setValue(CONFIG.get("storage_target", 50))
+        self.lbl_target = QLabel(f"{self.slider_target.value()}%")
+        self.slider_target.valueChanged.connect(self.update_storage_labels)
+        self.slider_target.valueChanged.connect(self.update_config_values)
+        h_target.addWidget(self.slider_target)
+        h_target.addWidget(self.lbl_target)
+        l_storage.addLayout(h_target)
+
+        # Enable/Disable Checkbox
+        self.cb_rolling_enabled = QCheckBox("Enable Rolling Storage")
+        self.cb_rolling_enabled.setChecked(CONFIG.get("rolling_storage_enabled", True))
+        self.cb_rolling_enabled.toggled.connect(self.update_config_values)
+        l_storage.addWidget(self.cb_rolling_enabled)
+        
+        # Refresh Interval
+        h_refresh = QHBoxLayout()
+        h_refresh.addWidget(QLabel("Refresh Interval (sec):"))
+        self.spin_refresh = QDoubleSpinBox()
+        self.spin_refresh.setRange(10.0, 300.0)
+        self.spin_refresh.setValue(CONFIG.get("storage_refresh_interval", 60.0))
+        self.spin_refresh.valueChanged.connect(self.update_config_values)
+        h_refresh.addWidget(self.spin_refresh)
+        l_storage.addLayout(h_refresh)
+
+        gb_storage.setLayout(l_storage)
+        layout.addWidget(gb_storage)
+
         # 3. Matrix Control
         gb_matrix = QGroupBox("Matrix Control")
         l_matrix = QVBoxLayout()
@@ -847,10 +1020,6 @@ class TwitchGui(QMainWindow):
         self.slider_bright.valueChanged.connect(self.set_brightness)
         h_bright.addWidget(self.slider_bright)
         
-        self.storage_bar = QProgressBar()
-        self.storage_bar.setValue(0)
-        self.storage_bar.setFormat("Storage: ? / ? MB")
-
         h_play = QHBoxLayout()
         self.combo_playlist = QComboBox()
         self.combo_playlist.addItem("Default")
@@ -865,7 +1034,6 @@ class TwitchGui(QMainWindow):
 
         l_matrix.addWidget(self.lbl_status_matrix)
         l_matrix.addLayout(h_bright)
-        l_matrix.addWidget(self.storage_bar)
         l_matrix.addLayout(h_play)
         l_matrix.addWidget(self.btn_purge)
         gb_matrix.setLayout(l_matrix)
@@ -909,10 +1077,25 @@ class TwitchGui(QMainWindow):
         sb = self.txt_log.verticalScrollBar()
         sb.setValue(sb.maximum())
 
+    def update_storage_labels(self):
+        """Updates the slider labels with MB values based on total storage."""
+        total_mb = self.matrix.total_storage / (1024 * 1024)
+        
+        th_val = self.slider_threshold.value()
+        th_mb = total_mb * (th_val / 100.0)
+        self.lbl_threshold.setText(f"{th_val}% ({th_mb:.1f} MB)")
+        
+        ta_val = self.slider_target.value()
+        ta_mb = total_mb * (ta_val / 100.0)
+        self.lbl_target.setText(f"{ta_val}% ({ta_mb:.1f} MB)")
+
     def update_storage(self, total, used):
         self.storage_bar.setMaximum(total)
         self.storage_bar.setValue(used)
         self.storage_bar.setFormat(f"Storage: {used/(1024*1024):.1f} / {total/(1024*1024):.1f} MB")
+        
+        # Update slider labels now that we know total storage
+        self.update_storage_labels()
 
     def update_playlists(self, playlists):
         current = self.combo_playlist.currentText()
@@ -933,25 +1116,39 @@ class TwitchGui(QMainWindow):
         if connected:
             self.lbl_status_twitch.setText(f"Twitch: Connected (#{self.bot.channel})")
             self.lbl_status_twitch.setStyleSheet("color: #4caf50;")
+            self.btn_connect.setText("Disconnect")
         else:
             self.lbl_status_twitch.setText("Twitch: Disconnected")
             self.lbl_status_twitch.setStyleSheet("color: #ce3030;")
+            self.btn_connect.setText("Connect")
 
     def toggle_connection(self):
         if self.bot.running:
             self.bot.stop()
-            self.btn_connect.setText("Connect")
             self.log_msg("[System] Disconnecting from Twitch...")
+            # UI update happens via signal
         else:
             new_channel = self.txt_channel.text()
             CONFIG["twitch_channel"] = new_channel
             self.bot.update_credentials(new_channel, CONFIG["twitch_oauth_token"], CONFIG["twitch_username"])
             self.bot.start()
-            self.btn_connect.setText("Disconnect")
+            # UI update happens via signal
 
     def update_config_values(self):
         CONFIG["show_duration"] = self.spin_duration.value()
         CONFIG["always_show_last_emote"] = self.cb_always_show.isChecked()
+        # Rolling Storage
+        CONFIG["storage_threshold"] = self.slider_threshold.value()
+        CONFIG["storage_target"] = self.slider_target.value()
+        CONFIG["rolling_storage_enabled"] = self.cb_rolling_enabled.isChecked()
+        
+        old_interval = CONFIG.get("storage_refresh_interval", 60.0)
+        new_interval = self.spin_refresh.value()
+        CONFIG["storage_refresh_interval"] = new_interval
+        
+        if old_interval != new_interval:
+            self.start_refresh_timer()
+            
         # Note: TwitchBot uses CONFIG directly in _reset_timer, so changes apply immediately
 
     def save_configuration(self):
@@ -1026,6 +1223,9 @@ class TwitchGui(QMainWindow):
         sender = self.sender()
         if sender in self.active_loaders:
             self.active_loaders.remove(sender)
+            # Wait for thread to actually finish before deleting
+            sender.quit()
+            sender.wait()
             sender.deleteLater()
 
     def show_emote_context_menu(self, pos):
@@ -1067,6 +1267,28 @@ class TwitchGui(QMainWindow):
         """Opens dialog to edit blacklist"""
         dialog = BlacklistEditorDialog(self)
         dialog.exec()
+
+    def start_refresh_timer(self):
+        interval = CONFIG.get("storage_refresh_interval", 60.0) * 1000
+        self.refresh_timer.start(int(interval))
+        self.log_msg(f"[System] Storage refresh interval: {CONFIG.get('storage_refresh_interval')}s")
+
+    def refresh_storage_info(self):
+        if self.matrix.connected:
+            self.matrix.send_cmd("list", {})
+            # self.log_msg("[System] Auto-refreshing storage info...") # Optional: Log it
+
+    def closeEvent(self, event):
+        """Cleanup threads on exit"""
+        self.bot.stop()
+        
+        # Stop all active loaders
+        for loader in self.active_loaders:
+            if loader.isRunning():
+                loader.quit()
+                loader.wait()
+        
+        event.accept()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

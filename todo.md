@@ -13,6 +13,8 @@ All planned MQTT and Home Assistant features have been successfully implemented.
 *   [ ] **Stream Lag:** Live stream is stable but latency could be further reduced by optimizing the compression/encoding on the client side (maybe simple RLE?).
 
 ### 2. Client / GUI Features
+*   [x] **DONE:** **Rolling Storage UI:** Configuration for threshold/target, MB display, and auto-refresh interval.
+*   [x] **DONE:** **Auto-Refresh:** Timer-based synchronization of file list and storage stats.
 *   [ ] **Playlist Management in GUI:** Currently, creating new playlists requires manually typing a folder name during upload. A "Create Folder" button or drag-and-drop into a tree view would be better.
 *   [ ] **Preview Cache:** The client re-downloads images for preview every time. A local LRU cache for thumbnails would speed up the library view.
 
@@ -27,6 +29,7 @@ All planned MQTT and Home Assistant features have been successfully implemented.
 *   [x] **DONE:** Emote History (with Thumbnails).
 *   [x] **DONE:** Connection Toggle (Disconnect button).
 *   [x] **DONE:** Blacklist System (GUI, Right-click block, JSON persistence).
+*   [x] **DONE:** Sync Protection (Queue blocks during file list update).
 *   [ ] **Feature:** "Hype Train" mode (special visual effects on the matrix when a Hype Train starts).
 *   [ ] **Feature:** Filter emotes (Sub-only, Keywords).
 
