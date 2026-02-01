@@ -30,6 +30,7 @@ All planned MQTT and Home Assistant features have been successfully implemented.
 *   [x] **DONE:** Connection Toggle (Disconnect button).
 *   [x] **DONE:** Blacklist System (GUI, Right-click block, JSON persistence).
 *   [x] **DONE:** Sync Protection (Queue blocks during file list update).
+*   [x] **DONE:** Flash Endurance Check (Simulated > 1000 years lifespan).
 *   [ ] **Feature:** "Hype Train" mode (special visual effects on the matrix when a Hype Train starts).
 *   [ ] **Feature:** Filter emotes (Sub-only, Keywords).
 

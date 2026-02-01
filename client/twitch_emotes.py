@@ -586,6 +586,7 @@ class TwitchBot:
         self.idle_timer = None
         self.ws = None
         self.running = False
+        self.stop_event = threading.Event()
         self.thread = None
         self.custom_emotes = {} # Code -> URL (FFZ & 7TV)
         
@@ -603,6 +604,7 @@ class TwitchBot:
     def start(self):
         if self.running: return
         self.running = True
+        self.stop_event.clear()
         
         # Load Custom Emotes (FFZ, 7TV)
         self.custom_emotes = {} # Clear
@@ -765,6 +767,7 @@ class TwitchBot:
 
     def stop(self):
         self.running = False
+        self.stop_event.set()
         if self.ws:
             self.ws.close()
         # Stop Timer
@@ -784,8 +787,10 @@ class TwitchBot:
             on_error=self._on_error,
             on_close=self._on_close
         )
+        self.ws.run_forever()
+
     def _run_canvas_loop(self):
-        while self.running:
+        while not self.stop_event.is_set():
             if CONFIG.get("canvas_enabled", False) and self.canvas.is_dirty:
                 self.canvas.save() # Persist
                 
@@ -796,10 +801,15 @@ class TwitchBot:
                     if self.matrix.upload_file("place.gif", gif_io):
                         self.canvas.is_dirty = False
                         self.signals.canvas_updated.emit() # Notify GUI
+                        
+                        # Force refresh on matrix so new pixels are visible immediately
+                        # We only do this if Canvas Mode is enabled (checked above)
+                        # This might interrupt an active emote, but provides live feedback.
+                        self.matrix.play_file("place.gif") 
                 except Exception as e:
                     self.signals.log.emit(f"[Canvas] Upload Error: {e}")
             
-            time.sleep(2.0) # Check every 2 seconds
+            self.stop_event.wait(2.0) # Check every 2 seconds, interrupted by stop_event
 
     def _on_open(self, ws):
         self.signals.log.emit(f"[Twitch] Connected. Joining #{self.channel}...")
