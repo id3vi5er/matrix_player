@@ -33,13 +33,9 @@ A standalone GUI application (`client/twitch_emotes.py`) connects your matrix to
 *   **Smart Caching:** Downloads emotes once and caches them on the ESP32 (in `/twitch/` folder) to save bandwidth. Auto-refreshes storage stats.
 *   **Flash Safe:** Calculated lifespan of Flash memory even with heavy Twitch usage (> 1000 years).
 *   **Customization:** Adjust display duration and idle behavior directly in the app.
-*   **Setup:** Copy `client/config.json.example` to `client/config.json` and enter your credentials.
 
-### Home Automation (MQTT)
-*   **Home Assistant Integration:** Fully controllable via MQTT.
-*   **Auto-Discovery:** Automatically creates entities in Home Assistant for brightness, power, and playlist selection.
-*   **Remote Control:** Change playlists, loop specific files, or adjust brightness remotely.
-*   **Status Updates:** Reports current file, playlist, and device status in real-time.
+## 📝 Roadmap & Development
+For planned features, known issues, and recent updates, check out the [todo.md](todo.md) file. This is where I track the development of new interactive Twitch events, hardware expansions, and stability improvements.
 
 ## 🛠 Hardware Setup
 
