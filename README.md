@@ -105,7 +105,7 @@ Configured in `src/Config.h`. Matches standard libraries for ESP32-S3:
     *   (Optional) Adjust MQTT topics in `src/Config.h`.
 3.  Connect your ESP32-S3 via USB.
 4.  Click **PlatformIO: Upload** to flash the firmware.
-5.  (Optional) Click **Upload Filesystem Image** to initialize LittleFS (wipes existing files).
+5.  (Recommended!) Click **Upload Filesystem Image** to initialize LittleFS (wipes existing files).
 
 ### 2. Desktop Client
 1.  Navigate to the `client/` directory.
