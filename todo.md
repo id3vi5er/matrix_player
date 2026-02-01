@@ -1,115 +1,40 @@
-# MQTT & Home Assistant Integration Plan
+# MQTT & Home Assistant Integration Plan (COMPLETED)
 
-## 1. Konfiguration & Abhängigkeiten
+All planned MQTT and Home Assistant features have been successfully implemented. The system now supports:
+- Full auto-discovery in Home Assistant (Light, Select, Text, Number, Switch).
+- Remote control of brightness, playlist, shuffle, loop duration, and text display.
+- Real-time status updates.
 
-### `platformio.ini`
-*   [ ] Library hinzufügen: `knolleary/PubSubClient`
-*   [ ] Build Flag hinzufügen: `-DMQTT_MAX_PACKET_SIZE=1024` (Wichtig für HA Discovery JSON!)
+## Pending Tasks & Known Issues
 
-### `src/Config.h`
-*   [ ] MQTT Credentials definieren:
-    ```cpp
-    #define MQTT_SERVER "192.168.178.12"
-    #define MQTT_PORT 1883
-    #define MQTT_USER "nils"
-    #define MQTT_PASS "degen1967"
-    #define MQTT_CLIENT_ID "ESP32_Matrix_Panel"
-    ```
+### 1. Stability & Bugs
+*   [ ] **Delete Large Playlists:** Deleting a folder with many files (e.g. >50 GIFs) can cause the ESP32 to trigger a Watchdog Timeout (WDT) and reboot. This is due to the synchronous `LittleFS.remove` loop blocking the main thread for too long.
+    *   *Solution Idea:* Yield (`delay(1)`) more frequently in the delete loop or move deletion to a separate FreeRTOS task.
+*   [ ] **Upload Reliability:** While greatly improved by `delay(1)` throttling, very large files or bad network conditions can still occasionally fail.
+*   [ ] **Stream Lag:** Live stream is stable but latency could be further reduced by optimizing the compression/encoding on the client side (maybe simple RLE?).
 
-## 2. MQTT Topics (Schema)
+### 2. Client / GUI Features
+*   [ ] **Playlist Management in GUI:** Currently, creating new playlists requires manually typing a folder name during upload. A "Create Folder" button or drag-and-drop into a tree view would be better.
+*   [ ] **Preview Cache:** The client re-downloads images for preview every time. A local LRU cache for thumbnails would speed up the library view.
 
-Definition der Topics als Konstanten (z.B. in `NetworkManager.h` oder `Config.h`):
+### 3. Firmware Features
+*   [ ] **OTA via GUI:** The "Update Firmware" button exists but the backend logic for file selection and POST request needs rigorous testing.
+*   [ ] **Transition Effects:** Currently, GIFs cut hard to the next one. Simple fade-to-black or cross-dissolve would look nicer.
 
-```cpp
-// Base: sensor/matrix/...
-const char* TOPIC_MATRIX_SWITCH_SET =   "sensor/matrix/light/switch";        // Payload: "ON" / "OFF"
-const char* TOPIC_MATRIX_BRIGHT_SET =   "sensor/matrix/light/brightness/set";// Payload: 0-255
-const char* TOPIC_MATRIX_STATUS =       "sensor/matrix/light/status";        // Payload: "ON" / "OFF"
-const char* TOPIC_MATRIX_BRIGHT =       "sensor/matrix/light/brightness";    // Payload: 0-255
-const char* TOPIC_MATRIX_FILE_SET =     "sensor/matrix/file/set";            // Payload: Filename
-const char* TOPIC_MATRIX_FILE_STATUS =  "sensor/matrix/file/status";         // Payload: Filename
-const char* TOPIC_AVAILABILITY =        "sensor/matrix/availability";        // Payload: "online" / "offline"
-```
+### 4. Twitch Integration
+*   [x] **DONE:** Standalone GUI (`twitch_emotes.py`).
+*   [x] **DONE:** FFZ / 7TV / BTTV Support.
+*   [x] **DONE:** Config UI.
+*   [ ] **Feature:** Allow filtering emotes (e.g. only from Subs, or only specific keywords).
+*   [ ] **Feature:** "Hype Train" mode (special visual effects on the matrix when a Hype Train starts).
 
-## 3. `src/NetworkManager.h` Erweiterungen
+## 5. Future Twitch Features (Brainstorming)
 
-*   [ ] Includes: `<PubSubClient.h>`, `<WiFi.h>`
-*   [ ] Member Variablen:
-    *   `WiFiClient wifiClient;`
-    *   `PubSubClient mqttClient;`
-    *   `unsigned long lastMqttReconnectAttempt = 0;`
-*   [ ] Methoden Deklarationen:
-    *   `void connectMQTT();`
-    *   `void mqttCallback(char* topic, uint8_t* payload, unsigned int length);`
-    *   `void publishDiscovery();` (Sendet HA Config)
-    *   `void updateHAAttributes();` (Sendet aktuellen Status/Helligkeit)
+### Interactive Events
+*   [ ] **🔥 Emote-Combo / Hype-Meter:** Detect spam of the same emote (e.g. 10x in 5s) and trigger a special "COMBO!" animation or blink effect.
+*   [ ] **🎰 Emote-Slotmachine:** Chat command `!roll` that cycles through random emotes and stops on one (win/loss mechanic).
+*   [ ] **🎨 r/place Pixel-Canvas:** Users set pixels via chat commands (`!pixel x y color`). The bot maintains a local image and uploads it to the matrix upon changes.
 
-## 4. `src/NetworkManager.cpp` Implementierung
-
-### A. Setup (Konstruktor/Begin)
-*   [ ] `mqttClient.setServer(MQTT_SERVER, MQTT_PORT);`
-*   [ ] `mqttClient.setCallback([this](...){ this->mqttCallback(...); });`
-
-### B. Loop Logik
-*   [ ] In `NetworkManager::loop()`:
-    *   Prüfen ob verbunden: `if (!mqttClient.connected()) connectMQTT();`
-    *   `mqttClient.loop();` aufrufen.
-
-### C. Verbindungsaufbau (`connectMQTT`)
-*   [ ] Non-Blocking Reconnect Logik (alle 5 Sekunden versuchen).
-*   [ ] Connect mit Last Will:
-    `mqttClient.connect(id, user, pass, TOPIC_AVAILABILITY, 0, true, "offline");`
-*   [ ] Bei Erfolg:
-    *   `mqttClient.publish(TOPIC_AVAILABILITY, "online", true);`
-    *   `mqttClient.subscribe(TOPIC_MATRIX_SWITCH_SET);`
-    *   `mqttClient.subscribe(TOPIC_MATRIX_BRIGHT_SET);`
-    *   `mqttClient.subscribe(TOPIC_MATRIX_FILE_SET);`
-    *   `publishDiscovery();` aufrufen.
-
-### D. Callback Logik (`mqttCallback`)
-*   [ ] Topic Vergleich (`strcmp`).
-*   [ ] **Switch Set:**
-    *   Wenn Payload "ON": `display->playAll()` (oder Resume).
-    *   Wenn Payload "OFF": `display->stop()` & `display->clearScreen()`.
-    *   Status Update senden an `TOPIC_MATRIX_STATUS`.
-*   [ ] **Brightness Set:**
-    *   Payload zu Int parsen (`atoi`).
-    *   `display->setBrightness(val)`.
-    *   Status Update an `TOPIC_MATRIX_BRIGHT`.
-*   [ ] **File Set:**
-    *   Payload als String (Dateiname).
-    *   `display->playFile(filename)`.
-
-### E. Home Assistant Discovery (`publishDiscovery`)
-*   [ ] Senden von JSON an `homeassistant/light/matrix_panel/config`.
-    *   JSON muss `command_topic` (..SWITCH_SET), `brightness_command_topic` (..BRIGHT_SET) etc. enthalten.
-    *   Muss auf `TOPIC_AVAILABILITY` verweisen.
-*   [ ] Senden von JSON an `homeassistant/select/matrix_file/config`.
-    *   Muss Liste aller Dateien (`options: [...]`) enthalten (via `fileMgr->listGifs()`).
-
-### F. Status Sync
-*   [ ] Verknüpfung mit `display->setFileChangeCallback`:
-    *   Wenn Datei wechselt -> `mqttClient.publish(TOPIC_MATRIX_FILE_STATUS, filename);`
-*   [ ] Bei Web-Upload -> `publishDiscovery()` erneut aufrufen (um Dateiliste in HA zu aktualisieren).
-
-## 5. Feature: Text & Laufschrift
-
-### A. MQTT Topics
-```cpp
-const char* TOPIC_MATRIX_TEXT_SET =     "sensor/matrix/text/set";            // Payload: "Hallo Welt"
-const char* TOPIC_MATRIX_TEXT_MODE =    "sensor/matrix/text/mode";           // Payload: "SCROLL", "STATIC", "LINES"
-const char* TOPIC_MATRIX_TEXT_COLOR =   "sensor/matrix/text/color";          // Payload: Hex "#FF0000"
-```
-
-### B. `DisplayManager` Erweiterung
-*   [ ] Fonts einbinden (via Adafruit GFX, z.B. `TomThumb` für kleine Screens oder Standard-Font).
-*   [ ] Neue Methoden:
-    *   `setText(String text, uint16_t color, bool scroll);`
-    *   `loopText();` (wird im Haupt-Loop aufgerufen für Scrolling-Berechnung).
-*   [ ] State-Management:
-    *   Modus-Umschaltung: Wenn Text gesetzt wird, `isPlaying` (GIF) stoppen.
-    *   `isTextMode` Flag einführen.
-
-### C. Home Assistant Discovery (Text)
-*   [ ] Discovery für `homeassistant/text/matrix_text/config` (Input Text).
-*   [ ] Discovery für `homeassistant/select/matrix_text_mode/config` (Modus Auswahl).
+### Alerts & Moderation
+*   [ ] **🚨 Raid Welcome:** Detect raids via PubSub/Chat, fetch the raider's profile picture from Twitch API, crop it to circle/square 64x64, and display it with a welcome text.
+*   [ ] **🛡️ Blacklist:** A local file (`blacklist.txt`) to block specific emote IDs or names (anti-troll / NSFW protection).
