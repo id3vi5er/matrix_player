@@ -571,8 +571,46 @@ void DisplayManager::_showText(const String& text, bool scroll) {
         textX = (PANEL_RES_X - (int)w) / 2;
         dma->setTextColor(textColor);
         // Center vertically: (64 - 8) / 2 = 28
-        dma->setCursor(textX, (PANEL_RES_Y - 7) / 2); 
+        dma->setCursor(textX, (PANEL_RES_Y - 7) / 2);
         dma->print(textMessage);
+    }
+}
+
+void DisplayManager::showDeleteProgress(const String& label, float progress) {
+    // Save state on first call (like text mode)
+    if (!isDeleteProgressMode) {
+        Serial.println("DisplayManager: Entering delete progress mode...");
+        savedIsPlaying = isPlaying;
+        savedSingleMode = singleMode;
+        savedCurrentFile = currentFile;
+        savedCurrentPlaylist = currentPlaylist;
+        _stop();
+    }
+
+    isDeleteProgressMode = true;
+    deleteLabel = label;
+    deleteProgress = progress;
+}
+
+void DisplayManager::hideDeleteProgress() {
+    if (!isDeleteProgressMode) return;
+
+    Serial.println("DisplayManager: Exiting delete progress mode, restoring state...");
+    isDeleteProgressMode = false;
+    dma->clearScreen();
+
+    // Restore previous playback state
+    if (savedIsPlaying) {
+        if (savedSingleMode) {
+            _playFile(savedCurrentFile);
+        } else {
+            singleMode = false;
+            currentPlaylist = savedCurrentPlaylist;
+            _playFile(savedCurrentFile);
+            singleMode = false;
+        }
+    } else {
+        _stop();
     }
 }
 
@@ -676,19 +714,49 @@ void DisplayManager::loop() {
     else if (isTextMode && textScroll) { // Update only if scrolling
         unsigned long now = millis();
         // Scroll speed: 50ms delay = 20 FPS
-        if (now - lastScrollTime > 50) { 
+        if (now - lastScrollTime > 50) {
             lastScrollTime = now;
-            
+
             textX--;
             if (textX < -textWidth) {
                 textX = PANEL_RES_X; // Loop
             }
-            
+
             dma->clearScreen();
             dma->setTextColor(textColor);
-            dma->setCursor(textX, (PANEL_RES_Y - 7) / 2); 
+            dma->setCursor(textX, (PANEL_RES_Y - 7) / 2);
             dma->print(textMessage);
         }
+        yield();
+    }
+    else if (isDeleteProgressMode) {
+        // Draw delete progress bar
+        dma->clearScreen();
+
+        // Label "Deleting..." at top
+        dma->setTextSize(1);
+        dma->setTextColor(dma->color565(255, 255, 255));
+        dma->setCursor(8, 20);
+        dma->print(deleteLabel);
+
+        // Percentage in center
+        dma->setTextSize(2);
+        dma->setCursor(20, 32);
+        dma->printf("%.0f%%", deleteProgress * 100);
+
+        // Progress bar at bottom
+        int barY = 50;
+        int barHeight = 6;
+        int barMaxWidth = PANEL_RES_X - 8;
+        int barFillWidth = (int)(barMaxWidth * deleteProgress);
+
+        // Background (dark gray)
+        dma->fillRect(4, barY, barMaxWidth, barHeight, dma->color565(50, 50, 50));
+        // Progress fill (green)
+        if (barFillWidth > 0) {
+            dma->fillRect(4, barY, barFillWidth, barHeight, dma->color565(0, 255, 0));
+        }
+
         yield();
     }
     else if (isPlaying && !isStreaming) {

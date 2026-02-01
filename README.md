@@ -21,6 +21,7 @@ This project is a complete ecosystem for controlling a **64x64 HUB75 RGB LED Mat
 *   **Text Mode:** Send scrolling text messages with custom colors.
 
 ### 🎮 Twitch Integration (New!)
+![Twitch Bot GUI](assets/twitch_bot.png)
 A standalone GUI application (`client/twitch_emotes.py`) connects your matrix to Twitch Chat.
 *   **Emote Support:** Displays native Twitch, **7TV**, **FrankerFaceZ (FFZ)**, and **BetterTTV (BTTV)** emotes automatically.
 *   **GUI Control:** Live preview of events, brightness control, and manual playlist override.

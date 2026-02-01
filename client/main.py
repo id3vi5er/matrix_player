@@ -1002,6 +1002,19 @@ class MatrixApp(QMainWindow):
                 filename = data.get('file')
                 self.handle_remote_preview(filename)
 
+            # Deletion Response Handling (async delete)
+            elif cmd == 'deletion_started':
+                name = data.get('name', '')
+                self.status_lbl.setText(f"Deleting playlist '{name}'...")
+
+            elif cmd == 'deletion_complete':
+                self.status_lbl.setText("Deletion complete!")
+
+            elif cmd == 'deletion_failed':
+                error = data.get('error', 'Unknown error')
+                self.status_lbl.setText(f"Deletion failed: {error}")
+                QMessageBox.warning(self, "Delete Failed", f"Could not delete playlist:\n{error}")
+
         except Exception as e:
             print(f"WS Text Error: {e} | Msg: {msg}")
 

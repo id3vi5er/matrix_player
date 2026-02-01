@@ -49,6 +49,10 @@ public:
     void showText(const String& text, bool scroll = false);
     void setTextColor(uint8_t r, uint8_t g, uint8_t b);
     void setTextSize(uint8_t size);
+
+    // Delete Progress Bar
+    void showDeleteProgress(const String& label, float progress);
+    void hideDeleteProgress();
     
     // Static Access for C-Callbacks
     static MatrixPanel_I2S_DMA* dma;
@@ -70,11 +74,16 @@ private:
     int textWidth = 0;
     unsigned long lastScrollTime = 0;
 
-    // State Backup (for returning from Text Mode)
+    // State Backup (for returning from Text/Progress Mode)
     bool savedIsPlaying = false;
     bool savedSingleMode = false;
     String savedCurrentFile;
     String savedCurrentPlaylist;
+
+    // Delete Progress Bar State
+    bool isDeleteProgressMode = false;
+    float deleteProgress = 0.0f;
+    String deleteLabel;
 
     // Streaming (Triple Buffering)
     uint8_t* netBuffer = nullptr;   // Network writes here

@@ -214,3 +214,135 @@ bool FileManager::removePlaylist(const String& playlist) {
         return false;
     }
 }
+
+// ============================================================================
+// Async Playlist Deletion Methods
+// ============================================================================
+
+bool FileManager::startPlaylistDeletion(const String& playlist, bool silent) {
+    // Reject if already deleting
+    if (deleteState != DEL_IDLE) {
+        Serial.println("FileManager: Deletion already in progress!");
+        deleteError = "Deletion already in progress";
+        return false;
+    }
+
+    // Store silent flag
+    deletionSilent = silent;
+
+    String folder = playlist;
+    if (!folder.startsWith("/")) folder = "/" + folder;
+
+    // Protection: Do not delete root or Default folder
+    if (folder == "/" || folder == "/Default") {
+        Serial.println("FileManager: Deletion of ROOT or /Default is protected.");
+        deleteError = "Protected folder";
+        deleteState = DEL_ERROR;
+        return false;
+    }
+
+    if (!LittleFS.exists(folder)) {
+        deleteError = "Folder not found";
+        deleteState = DEL_ERROR;
+        return false;
+    }
+
+    // Collect files (this is relatively fast - just listing, not deleting)
+    pendingDeleteFiles.clear();
+    File root = LittleFS.open(folder);
+    if (!root || !root.isDirectory()) {
+        deleteError = "Not a directory";
+        deleteState = DEL_ERROR;
+        return false;
+    }
+
+    File file = root.openNextFile();
+    while (file) {
+        String name = String(file.name());
+        String fullPath;
+        if (name.startsWith("/")) fullPath = name;
+        else {
+            fullPath = folder;
+            if (!fullPath.endsWith("/")) fullPath += "/";
+            fullPath += name;
+        }
+        fullPath.replace("//", "/");
+
+        if (!file.isDirectory()) {
+            pendingDeleteFiles.push_back(fullPath);
+        }
+        file = root.openNextFile();
+        delay(1); // Yield during collection
+    }
+    root.close();
+
+    // Setup state for incremental deletion
+    pendingDeleteFolder = folder;
+    deleteIndex = 0;
+    deletedCount = 0;
+    deleteTotal = pendingDeleteFiles.size();
+    deleteState = DEL_DELETING;
+
+    Serial.printf("FileManager: Started async deletion of %d files in %s\n",
+                  deleteTotal, folder.c_str());
+    return true;
+}
+
+void FileManager::loop() {
+    if (deleteState != DEL_DELETING) return;
+
+    // Delete up to FILES_PER_LOOP files per iteration
+    int deleted = 0;
+    while (deleteIndex < pendingDeleteFiles.size() && deleted < FILES_PER_LOOP) {
+        const String& fPath = pendingDeleteFiles[deleteIndex];
+
+        Serial.printf("FileManager: Deleting [%d/%d] %s\n",
+                      deleteIndex + 1, deleteTotal, fPath.c_str());
+
+        if (LittleFS.remove(fPath)) {
+            deletedCount++;
+        } else {
+            Serial.printf("FileManager: Failed to remove %s\n", fPath.c_str());
+        }
+
+        deleteIndex++;
+        deleted++;
+        delay(1); // Small yield between files
+    }
+
+    // Check if all files processed
+    if (deleteIndex >= pendingDeleteFiles.size()) {
+        // Try to remove the empty directory
+        if (LittleFS.rmdir(pendingDeleteFolder)) {
+            Serial.printf("FileManager: Playlist folder %s deleted. (%d/%d files)\n",
+                          pendingDeleteFolder.c_str(), deletedCount, deleteTotal);
+            deleteState = DEL_COMPLETE;
+        } else {
+            Serial.printf("FileManager: Failed to remove folder %s\n",
+                          pendingDeleteFolder.c_str());
+            deleteError = "rmdir failed";
+            deleteState = DEL_ERROR;
+        }
+
+        // Clear vectors to free memory
+        pendingDeleteFiles.clear();
+        pendingDeleteFiles.shrink_to_fit();
+    }
+}
+
+float FileManager::getDeleteProgress() const {
+    if (deleteTotal == 0) return 0.0f;
+    return (float)deleteIndex / (float)deleteTotal;
+}
+
+void FileManager::resetDeleteState() {
+    deleteState = DEL_IDLE;
+    pendingDeleteFiles.clear();
+    pendingDeleteFiles.shrink_to_fit();
+    pendingDeleteFolder = "";
+    deleteIndex = 0;
+    deletedCount = 0;
+    deleteTotal = 0;
+    deleteError = "";
+    deletionSilent = false;
+}

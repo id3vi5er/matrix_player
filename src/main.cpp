@@ -32,6 +32,7 @@ void setup() {
 }
 
 void loop() {
+  fileMgr.loop();  // Process async file operations (e.g., deletion)
   display.loop();
   network->loop();
   if (mqtt) mqtt->loop();

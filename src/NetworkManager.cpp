@@ -181,6 +181,59 @@ void NetworkManager::loop() {
         }
     }
     
+    // Check async deletion completion and update progress display
+    if (deletionInProgress) {
+        DeleteState state = fileMgr->getDeleteState();
+        unsigned long now = millis();
+
+        // Throttled progress display update (max 10 FPS, min 1% change) - only if NOT silent
+        if (!deletionSilent && state == DEL_DELETING && now - lastProgressUpdate >= PROGRESS_UPDATE_INTERVAL) {
+            float progress = fileMgr->getDeleteProgress();
+            if (progress - lastDisplayedProgress >= 0.01f || progress >= 1.0f) {
+                display->showDeleteProgress("Deleting...", progress);
+                lastDisplayedProgress = progress;
+                lastProgressUpdate = now;
+            }
+        }
+
+        if (state == DEL_COMPLETE) {
+            Serial.println("NetworkManager: Deletion complete!");
+            if (!deletionSilent) {
+                display->hideDeleteProgress();
+            }
+            lastDisplayedProgress = -1.0f;
+
+            // Notify the requesting client
+            AsyncWebSocketClient* client = ws.client(deletionClientId);
+            if (client && client->status() == WS_CONNECTED) {
+                client->text("{\"cmd\":\"deletion_complete\"}");
+                sendList(client);
+            }
+
+            fileMgr->resetDeleteState();
+            deletionInProgress = false;
+            deletionSilent = false;
+        }
+        else if (state == DEL_ERROR) {
+            Serial.println("NetworkManager: Deletion failed!");
+            if (!deletionSilent) {
+                display->hideDeleteProgress();
+            }
+            lastDisplayedProgress = -1.0f;
+
+            AsyncWebSocketClient* client = ws.client(deletionClientId);
+            if (client && client->status() == WS_CONNECTED) {
+                String errMsg = "{\"cmd\":\"deletion_failed\",\"error\":\"" +
+                                fileMgr->getDeleteError() + "\"}";
+                client->text(errMsg);
+            }
+
+            fileMgr->resetDeleteState();
+            deletionInProgress = false;
+            deletionSilent = false;
+        }
+    }
+
     if (shouldSendList) {
         shouldSendList = false;
         if (pendingListClientId != 0) {
@@ -292,20 +345,61 @@ void NetworkManager::handleJson(AsyncWebSocketClient *client, uint8_t *data, siz
     else if (cmd == "delete_playlist") {
         String pl = doc["name"];
         Serial.printf("Delete Playlist Request: %s\n", pl.c_str());
-        
+
+        // Check if deletion already in progress
+        if (deletionInProgress) {
+            client->text("{\"cmd\":\"deletion_failed\",\"error\":\"Deletion already in progress\"}");
+            delete docPtr;
+            return;
+        }
+
         // Force stop to release any open file handles
         display->forceStop();
         delay(50); // Allow FS to sync
 
-        if (fileMgr->removePlaylist(pl)) {
-            Serial.println("Playlist Delete Success");
+        // Start async deletion (returns immediately)
+        if (fileMgr->startPlaylistDeletion(pl, false)) {  // false = with progress bar
+            deletionInProgress = true;
+            deletionSilent = false;
+            deletionClientId = client->id();
+            lastDisplayedProgress = 0.0f;
+            lastProgressUpdate = millis();
+            display->showDeleteProgress("Deleting...", 0.0f);
+            client->text("{\"cmd\":\"deletion_started\",\"name\":\"" + pl + "\"}");
         } else {
-            Serial.println("Playlist Delete FAILED");
+            client->text("{\"cmd\":\"deletion_failed\",\"error\":\"" +
+                         fileMgr->getDeleteError() + "\"}");
         }
-        pendingListClientId = client->id();
-        shouldSendList = true;
+        // NOTE: Do NOT send list here - wait for completion
     }
-    
+    else if (cmd == "silent_delete_playlist") {
+        String pl = doc["name"];
+        Serial.printf("Silent Delete Playlist Request: %s\n", pl.c_str());
+
+        // Check if deletion already in progress
+        if (deletionInProgress) {
+            client->text("{\"cmd\":\"deletion_failed\",\"error\":\"Deletion already in progress\"}");
+            delete docPtr;
+            return;
+        }
+
+        // Force stop to release any open file handles
+        display->forceStop();
+        delay(50); // Allow FS to sync
+
+        // Start async deletion (returns immediately) - SILENT mode (no progress bar)
+        if (fileMgr->startPlaylistDeletion(pl, true)) {  // true = silent
+            deletionInProgress = true;
+            deletionSilent = true;  // NO showDeleteProgress()!
+            deletionClientId = client->id();
+            client->text("{\"cmd\":\"deletion_started\",\"name\":\"" + pl + "\",\"silent\":true}");
+        } else {
+            client->text("{\"cmd\":\"deletion_failed\",\"error\":\"" +
+                         fileMgr->getDeleteError() + "\"}");
+        }
+        // NOTE: Do NOT send list here - wait for completion
+    }
+
     delete docPtr;
 }
 

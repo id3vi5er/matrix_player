@@ -26,6 +26,16 @@ private:
     bool shouldSendList = false;
     uint32_t pendingListClientId = 0; // ID of client to send to (0 = all? or specific)
 
+    // Async deletion tracking
+    bool deletionInProgress = false;
+    bool deletionSilent = false;
+    uint32_t deletionClientId = 0;
+
+    // Progress display throttling
+    float lastDisplayedProgress = -1.0f;
+    unsigned long lastProgressUpdate = 0;
+    static const unsigned long PROGRESS_UPDATE_INTERVAL = 100; // Max 10 FPS
+
     // Wifi Retry Logic
     unsigned long lastWifiCheckTime = 0;
     const unsigned long WIFI_CHECK_INTERVAL = 60000; // 60s

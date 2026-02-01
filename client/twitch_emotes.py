@@ -9,9 +9,10 @@ import queue
 from PIL import Image, ImageSequence, ImageOps
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QLineEdit, QPushButton, QLabel, QSlider, QGroupBox, QTextEdit, 
-                             QMessageBox, QProgressBar, QComboBox, QCheckBox, QDoubleSpinBox)
-from PyQt6.QtGui import QFont, QColor
-from PyQt6.QtCore import Qt, pyqtSignal, QObject
+                             QMessageBox, QProgressBar, QComboBox, QCheckBox, QDoubleSpinBox,
+                             QListWidget, QListWidgetItem, QMenu, QTabWidget, QDialog)
+from PyQt6.QtGui import QFont, QColor, QPixmap, QIcon
+from PyQt6.QtCore import Qt, pyqtSignal, QObject, QThread, QSize
 import websocket
 
 # --- Global Config Loader ---
@@ -32,6 +33,29 @@ def save_config(cfg):
         return False
 
 CONFIG = load_config()
+
+# --- Blacklist Loader ---
+BLACKLIST_FILE = "blacklist.json"
+
+def load_blacklist():
+    if os.path.exists(BLACKLIST_FILE):
+        try:
+            with open(BLACKLIST_FILE, "r") as f:
+                return json.load(f)
+        except:
+            pass
+    return {"twitch_ids": [], "custom_names": [], "enabled": True}
+
+def save_blacklist(bl):
+    try:
+        with open(BLACKLIST_FILE, "w") as f:
+            json.dump(bl, f, indent=2)
+        return True
+    except Exception as e:
+        print(f"Error saving blacklist: {e}")
+        return False
+
+BLACKLIST = load_blacklist()
 
 # --- Image Processing ---
 def process_to_gif_bytes(img_src):
@@ -83,12 +107,31 @@ def process_to_gif_bytes(img_src):
 
 # --- Logic Classes (adapted for GUI) ---
 
+class ImageLoader(QThread):
+    loaded = pyqtSignal(str, QPixmap) # url, pixmap
+
+    def __init__(self, url):
+        super().__init__()
+        self.url = url
+
+    def run(self):
+        try:
+            r = requests.get(self.url, timeout=5)
+            if r.status_code == 200:
+                data = r.content
+                pixmap = QPixmap()
+                pixmap.loadFromData(data)
+                self.loaded.emit(self.url, pixmap)
+        except:
+            pass
+
 class WorkerSignals(QObject):
     log = pyqtSignal(str)
     connected_matrix = pyqtSignal(bool)
     connected_twitch = pyqtSignal(bool)
     storage_update = pyqtSignal(int, int) # total, used
     playlists_update = pyqtSignal(list)
+    emote_received = pyqtSignal(str, str, str) # name, type, id/url
 
 class MatrixController:
     def __init__(self, ip, signals):
@@ -317,8 +360,8 @@ class MatrixController:
 
     def purge_twitch_folder(self):
         if self.connected:
-            self.signals.log.emit("[System] Purging /twitch/ folder on ESP32...")
-            self.send_cmd("delete_playlist", {"name": "twitch"})
+            self.signals.log.emit("[System] Purging /twitch/ folder on ESP32 (silent)...")
+            self.send_cmd("silent_delete_playlist", {"name": "twitch"})
             # Clear local cache of twitch files
             self.known_files = {f for f in self.known_files if not f.startswith("/twitch/") and not f.startswith("twitch/")}
             self.signals.log.emit("[System] Cache cleared.")
@@ -516,6 +559,9 @@ class TwitchBot:
         self.running = False
         if self.ws:
             self.ws.close()
+        # Stop Timer
+        if self.idle_timer:
+            self.idle_timer.cancel()
 
     def restart(self):
         self.stop()
@@ -595,12 +641,22 @@ class TwitchBot:
 
     def _process_emote(self, emote_id):
         # Native Twitch Handler
+        if BLACKLIST.get("enabled", True) and emote_id in BLACKLIST.get("twitch_ids", []):
+            self.signals.log.emit(f"[Blocked] Twitch Emote: {emote_id}")
+            return
+
         self.last_emote_time = time.time()
         self.matrix.queue_emote(emote_id)
         self._reset_timer()
+        
+        self.signals.emote_received.emit(emote_id, "twitch", emote_id)
 
     def _process_emote_url(self, name, url):
         # Handler for external URLs (FFZ)
+        if BLACKLIST.get("enabled", True) and name in BLACKLIST.get("custom_names", []):
+            self.signals.log.emit(f"[Blocked] Custom Emote: {name}")
+            return
+
         self.last_emote_time = time.time()
         # Create a pseudo-ID for FFZ to use the same queue logic
         # We need to tell MatrixController that this is a custom URL, not a Twitch ID.
@@ -608,6 +664,8 @@ class TwitchBot:
         # Or extend MatrixController.
         self.matrix.queue_custom_emote(name, url)
         self._reset_timer()
+
+        self.signals.emote_received.emit(name, "custom", url)
 
     def _reset_timer(self):
         if self.idle_timer:
@@ -630,6 +688,55 @@ class TwitchBot:
     def _on_close(self, ws, *args):
         self.signals.connected_twitch.emit(False)
         self.signals.log.emit("[Twitch] Disconnected")
+
+class BlacklistEditorDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Edit Blacklist")
+        self.resize(400, 300)
+
+        layout = QVBoxLayout(self)
+
+        # Tabs for Twitch IDs and Custom Names
+        self.tabs = QTabWidget()
+
+        # Tab 1: Twitch IDs
+        self.twitch_list = QListWidget()
+        self.twitch_list.addItems(BLACKLIST.get("twitch_ids", []))
+        tab1 = QWidget()
+        l1 = QVBoxLayout(tab1)
+        l1.addWidget(self.twitch_list)
+        btn_remove_twitch = QPushButton("Remove Selected")
+        btn_remove_twitch.clicked.connect(lambda: self.remove_selected(self.twitch_list, "twitch_ids"))
+        l1.addWidget(btn_remove_twitch)
+        self.tabs.addTab(tab1, "Twitch IDs")
+
+        # Tab 2: Custom Names
+        self.custom_list = QListWidget()
+        self.custom_list.addItems(BLACKLIST.get("custom_names", []))
+        tab2 = QWidget()
+        l2 = QVBoxLayout(tab2)
+        l2.addWidget(self.custom_list)
+        btn_remove_custom = QPushButton("Remove Selected")
+        btn_remove_custom.clicked.connect(lambda: self.remove_selected(self.custom_list, "custom_names"))
+        l2.addWidget(btn_remove_custom)
+        self.tabs.addTab(tab2, "Custom Names")
+
+        layout.addWidget(self.tabs)
+
+        # Close Button
+        btn_close = QPushButton("Close")
+        btn_close.clicked.connect(self.accept)
+        layout.addWidget(btn_close)
+
+    def remove_selected(self, list_widget, key):
+        items = list_widget.selectedItems()
+        for item in items:
+            value = item.text()
+            if value in BLACKLIST[key]:
+                BLACKLIST[key].remove(value)
+            list_widget.takeItem(list_widget.row(item))
+        save_blacklist(BLACKLIST)
 
 # --- GUI ---
 
@@ -657,14 +764,21 @@ class TwitchGui(QMainWindow):
         self.signals.connected_twitch.connect(self.update_twitch_status)
         self.signals.storage_update.connect(self.update_storage)
         self.signals.playlists_update.connect(self.update_playlists)
+        self.signals.emote_received.connect(self.add_emote_to_history)
 
         self.matrix = MatrixController(CONFIG["esp32_ip"], self.signals)
         self.bot = TwitchBot(CONFIG["twitch_channel"], CONFIG["twitch_oauth_token"], CONFIG["twitch_username"], self.matrix, self.signals)
 
+        self.image_cache = {} # URL -> QPixmap
+        self.active_loaders = []
+
         self.init_ui()
         self.matrix.start()
+        # Don't auto-start bot here, let the UI button handle it if needed, or stick to auto-start but sync button text
         if self.bot.token and self.bot.channel:
             self.bot.start()
+            # We will update button text in init_ui or right after showing
+
 
     def init_ui(self):
         central = QWidget()
@@ -678,8 +792,10 @@ class TwitchGui(QMainWindow):
         h_chan = QHBoxLayout()
         h_chan.addWidget(QLabel("Channel:"))
         self.txt_channel = QLineEdit(CONFIG["twitch_channel"])
-        self.btn_connect = QPushButton("Connect / Update")
-        self.btn_connect.clicked.connect(self.update_twitch)
+        self.btn_connect = QPushButton("Connect")
+        if self.bot.running:
+             self.btn_connect.setText("Disconnect")
+        self.btn_connect.clicked.connect(self.toggle_connection)
         h_chan.addWidget(self.txt_channel)
         h_chan.addWidget(self.btn_connect)
         
@@ -755,6 +871,30 @@ class TwitchGui(QMainWindow):
         gb_matrix.setLayout(l_matrix)
         layout.addWidget(gb_matrix)
 
+        # 3.5 Emote History
+        gb_history = QGroupBox("Recent Emotes (Right-click to Blacklist)")
+        l_history = QVBoxLayout()
+
+        self.emote_list = QListWidget()
+        self.emote_list.setMaximumHeight(150)
+        self.emote_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.emote_list.customContextMenuRequested.connect(self.show_emote_context_menu)
+        l_history.addWidget(self.emote_list)
+
+        # Blacklist Buttons
+        h_bl = QHBoxLayout()
+        self.btn_edit_blacklist = QPushButton("Edit Blacklist")
+        self.btn_edit_blacklist.clicked.connect(self.open_blacklist_editor)
+        self.cb_blacklist_enabled = QCheckBox("Blacklist Active")
+        self.cb_blacklist_enabled.setChecked(BLACKLIST.get("enabled", True))
+        self.cb_blacklist_enabled.toggled.connect(self.toggle_blacklist)
+        h_bl.addWidget(self.cb_blacklist_enabled)
+        h_bl.addWidget(self.btn_edit_blacklist)
+        l_history.addLayout(h_bl)
+
+        gb_history.setLayout(l_history)
+        layout.addWidget(gb_history)
+
         # 4. Log
         gb_log = QGroupBox("Event Log")
         l_log = QVBoxLayout()
@@ -797,11 +937,17 @@ class TwitchGui(QMainWindow):
             self.lbl_status_twitch.setText("Twitch: Disconnected")
             self.lbl_status_twitch.setStyleSheet("color: #ce3030;")
 
-    def update_twitch(self):
-        new_channel = self.txt_channel.text()
-        if new_channel:
-            self.bot.update_credentials(new_channel, CONFIG["twitch_oauth_token"], CONFIG["twitch_username"])
+    def toggle_connection(self):
+        if self.bot.running:
+            self.bot.stop()
+            self.btn_connect.setText("Connect")
+            self.log_msg("[System] Disconnecting from Twitch...")
+        else:
+            new_channel = self.txt_channel.text()
             CONFIG["twitch_channel"] = new_channel
+            self.bot.update_credentials(new_channel, CONFIG["twitch_oauth_token"], CONFIG["twitch_username"])
+            self.bot.start()
+            self.btn_connect.setText("Disconnect")
 
     def update_config_values(self):
         CONFIG["show_duration"] = self.spin_duration.value()
@@ -832,6 +978,95 @@ class TwitchGui(QMainWindow):
                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply == QMessageBox.StandardButton.Yes:
             self.matrix.purge_twitch_folder()
+
+    def add_emote_to_history(self, name, emote_type, identifier):
+        """Adds emote to history list (max 20 entries)"""
+        timestamp = time.strftime("%H:%M:%S")
+        
+        # Determine URL
+        if emote_type == "twitch":
+            url = f"https://static-cdn.jtvnw.net/emoticons/v2/{identifier}/default/dark/1.0"
+        else:
+            url = identifier
+
+        item = QListWidgetItem(f"   [{timestamp}] {name}")
+        
+        # Check Cache
+        if url in self.image_cache:
+            item.setIcon(QIcon(self.image_cache[url]))
+        else:
+            # Placeholder or keep empty, start loader
+            # Start Loader
+            loader = ImageLoader(url)
+            loader.loaded.connect(self.on_image_loaded)
+            loader.start()
+            self.active_loaders.append(loader)
+
+        item.setData(Qt.ItemDataRole.UserRole, {"name": name, "type": emote_type, "id": identifier, "url": url})
+
+        self.emote_list.insertItem(0, item)  # Newest on top
+
+        # Max 20 entries
+        while self.emote_list.count() > 20:
+            self.emote_list.takeItem(self.emote_list.count() - 1)
+
+    def on_image_loaded(self, url, pixmap):
+        # Cache
+        scaled_pix = pixmap.scaled(28, 28, Qt.AspectRatioMode.KeepAspectRatio)
+        self.image_cache[url] = scaled_pix
+        
+        # Update List Items
+        for i in range(self.emote_list.count()):
+            item = self.emote_list.item(i)
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if data and data.get("url") == url:
+                item.setIcon(QIcon(scaled_pix))
+        
+        # Cleanup loader
+        sender = self.sender()
+        if sender in self.active_loaders:
+            self.active_loaders.remove(sender)
+            sender.deleteLater()
+
+    def show_emote_context_menu(self, pos):
+        """Right-click menu for blacklist"""
+        item = self.emote_list.itemAt(pos)
+        if not item:
+            return
+
+        data = item.data(Qt.ItemDataRole.UserRole)
+        menu = QMenu(self)
+
+        action_block = menu.addAction(f"Block '{data['name']}'")
+        action_block.triggered.connect(lambda: self.add_to_blacklist(data))
+
+        menu.exec(self.emote_list.mapToGlobal(pos))
+
+    def add_to_blacklist(self, data):
+        """Adds emote to blacklist"""
+        if data["type"] == "twitch":
+            if data["id"] not in BLACKLIST["twitch_ids"]:
+                BLACKLIST["twitch_ids"].append(data["id"])
+        else:
+            if data["name"] not in BLACKLIST["custom_names"]:
+                BLACKLIST["custom_names"].append(data["name"])
+
+        if save_blacklist(BLACKLIST):
+            self.log_msg(f"[Blacklist] Added: {data['name']}")
+        else:
+            self.log_msg("[Blacklist] Error saving!")
+
+    def toggle_blacklist(self, enabled):
+        """Activates/Deactivates Blacklist"""
+        BLACKLIST["enabled"] = enabled
+        save_blacklist(BLACKLIST)
+        status = "enabled" if enabled else "disabled"
+        self.log_msg(f"[Blacklist] {status}")
+
+    def open_blacklist_editor(self):
+        """Opens dialog to edit blacklist"""
+        dialog = BlacklistEditorDialog(self)
+        dialog.exec()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
