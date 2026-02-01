@@ -1,8 +1,51 @@
 # 📟 Projektverlauf: ESP32-64x64 RGB Matrix
 
+## 🗓 Stand: 01. Februar 2026
+
+### 🎮 Twitch Bot & r/place Canvas
+1.  **Twitch Bot Client (`twitch_emotes.py`):**
+    *   **Emote History:** GUI-Widget für die letzten 20 Emotes mit Zeitstempel und asynchron geladenen Vorschaubildern (Caching im Thread).
+    *   **Blacklist System:** Emotes per Rechtsklick blockieren. Persistente Speicherung in `blacklist.json`. Verhindert Spam und unerwünschte Inhalte.
+    *   **Rolling Storage (LRU):** Automatische Speicherverwaltung für den `/twitch/` Ordner. Konfigurierbarer Schwellenwert (z.B. ab 80% voll löschen bis 50%). GUI-Anzeige mit MB- und Prozent-Werten.
+    *   **Auto-Refresh:** Automatisches Synchronisieren der Dateiliste und Speicherstatistik (konfigurierbarer Timer).
+    *   **Sync Protection:** Wiedergabe pausiert kurzzeitig während des Empfangs der Dateiliste, um Konflikte zu vermeiden.
+    *   **Flash-Haltbarkeit:** Simulation ergab >1000 Jahre Lebensdauer auch bei intensiver Nutzung.
+
+2.  **r/place Pixel Game:**
+    *   **Interaktives Canvas:** 64x64 Leinwand, die von Twitch-Usern bemalt werden kann. Ersetzt das Idle-Bild.
+    *   **Befehle:**
+        *   `!px <x> <y> <color>`: Einzelnen Pixel setzen.
+        *   `!ln <x1> <y1> <x2> <y2> <color>`: Linie zeichnen.
+        *   `!cr <x> <y> <r> <color>`: Kreis zeichnen.
+    *   **Smart Upload:** Das Canvas wird nur bei Änderungen (`dirty flag`) hochgeladen, um Bandbreite und Flash zu schonen.
+    *   **Priorisierung:** Emotes unterbrechen das Canvas (High Priority). Nach Ablauf des Emotes wird automatisch das aktuelle Canvas wieder angezeigt.
+    *   **GUI:** Live-Vorschau des Canvas im Client, Reset-Button und Force-Upload.
+
+### 🛠 Firmware & System Optimierungen
+3.  **Live-Stream Fixes:**
+    *   **Latenz:** "Buffer Bloat" behoben durch Timeout-Logik im Client und sofortige Datenannahme in der Firmware (`allowIncomingStream`). Stream läuft nun synchron.
+    *   **Stream Settings:** Neues Einstellungsmenü im Client für Crop, Scale (Fit/Fill/Stretch) und Zoom während des Streams (mit Live-Vorschau).
+    *   **FPS:** Geglättete FPS-Anzeige im Client.
+
+4.  **GIF Wiedergabe:**
+    *   **Seek-Fix:** `GIFSeekFile` korrigiert (Return -1 bei Fehler), was das Abbrechen von Animationen behebt.
+    *   **Disposal Method:** Client konvertiert nun standardmäßig mit `Disposal=1` (Overlay) für flüssigere Darstellung auf der Matrix.
+
+5.  **Robustheit:**
+    *   **Async Deletion:** Löschen großer Playlisten (oder des Twitch-Ordners) blockiert nicht mehr den Main-Loop (WDT Resets behoben).
+    *   **Thread Safety:** Sauberer Shutdown von Threads im Python-Client (`closeEvent`).
+
+### 📚 Dokumentation
+6.  **README Overhaul:**
+    *   Neuer Header mit Badges.
+    *   Inhaltsverzeichnis.
+    *   OAuth Token Anleitung (twitchtokengenerator.com).
+    *   Screenshots aktualisiert.
+    *   Roadmap Verweis auf `todo.md`.
+
 ## 🗓 Stand: 25. Januar 2026
 
-### 🚀 Implementierte Features (Heute)
+### 🚀 Implementierte Features
 1. **Playlist-System:**
    - LittleFS-Struktur unterstützt nun Unterordner (z.B. `/Default/`, `/Urlaub/`).
    - `FileManager` wurde erweitert, um Ordner als Playlisten zu listen und Inhalte gezielt abzurufen.
