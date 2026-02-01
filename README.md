@@ -21,14 +21,12 @@ This project is a complete ecosystem for controlling a **64x64 HUB75 RGB LED Mat
 *   **Text Mode:** Send scrolling text messages with custom colors.
 
 ### 🎮 Twitch Integration (New!)
-A standalone script (`client/twitch_emotes.py`) connects your matrix to Twitch Chat.
-*   **Auto-Emote Display:** Automatically detects emotes in chat and displays them on the matrix.
-*   **Animation Support:** Fully supports animated Twitch emotes (GIFs).
-*   **Caching:** Downloads emotes once and caches them on the ESP32 (in `/twitch/` folder) to save bandwidth.
-*   **Idle Mode:** Shows a custom idle animation when chat is quiet.
+A standalone GUI application (`client/twitch_emotes.py`) connects your matrix to Twitch Chat.
+*   **Emote Support:** Displays native Twitch, **7TV**, **FrankerFaceZ (FFZ)**, and **BetterTTV (BTTV)** emotes automatically.
+*   **GUI Control:** Live preview of events, brightness control, and manual playlist override.
+*   **Smart Caching:** Downloads emotes once and caches them on the ESP32 (in `/twitch/` folder) to save bandwidth.
+*   **Customization:** Adjust display duration and idle behavior directly in the app.
 *   **Setup:** Copy `client/config.json.example` to `client/config.json` and enter your credentials.
-
-### Home Automation (MQTT)
 
 ### Home Automation (MQTT)
 *   **Home Assistant Integration:** Fully controllable via MQTT.

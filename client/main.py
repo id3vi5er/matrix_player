@@ -1331,6 +1331,19 @@ class MatrixApp(QMainWindow):
         )
         if reply == QMessageBox.StandardButton.Yes:
             self.send_cmd("delete_playlist", {"name": playlist})
+            
+            # Optimization: Remove from local state immediately
+            prefix = f"/{playlist}/"
+            self.all_files = [f for f in self.all_files if not (f.startswith(prefix) or f == f"/{playlist}")]
+            
+            # Remove from combo
+            idx = self.playlist_combo.findText(playlist)
+            if idx >= 0:
+                self.playlist_combo.removeItem(idx)
+            
+            self.playlist_combo.setCurrentText("ALL")
+            self.update_file_list_view()
+            self.status_lbl.setText(f"Deleted playlist '{playlist}' (Local Cache Updated)")
 
     def delete_selected(self):
         item = self.file_list.currentItem()
@@ -1374,12 +1387,18 @@ class MatrixApp(QMainWindow):
                     r = requests.post(url, files=files, headers=headers, timeout=60)
                     if r.status_code != 200:
                         print(f"Failed to upload {filename}: {r.status_code}")
+                    else:
+                        # Optimization: Add to local list immediately instead of reloading everything
+                        server_path = f"/{settings['playlist']}/{filename}".replace("//", "/")
+                        if server_path not in self.all_files:
+                            self.all_files.append(server_path)
                 
                 except Exception as e:
                     print(f"Upload Error on {path}: {e}")
 
             self.status_lbl.setText("Upload Complete")
-            self.send_cmd("list")
+            self.update_file_list_view()
+            # self.send_cmd("list") # Disabled to prevent full reload lag
 
     def enable_controls(self, state):
 
