@@ -124,10 +124,12 @@ Configured in `src/Config.h`. Matches standard libraries for ESP32-S3:
 
 To use the Twitch Bot integration, you need an OAuth token.
 
-1.  **Visit a Token Generator:** Go to [twitchapps.com/tmi/](https://twitchapps.com/tmi/).
-2.  **Authorize:** Click "Connect" and authorize the application with your Twitch account.
-3.  **Copy Token:** Copy the entire string (including `oauth:`).
-4.  **Configure:** Paste this token into your `client/config.json` file (created from `client/config.json.example`) under `"twitch_oauth_token"`.
+1.  **Visit the Generator:** Go to [twitchtokengenerator.com](https://twitchtokengenerator.com/).
+2.  **Select Scopes:** For basic chat interaction, you need `chat:read` and `chat:edit`.
+3.  **Authorize:** Click "Generate Token" and authorize with your Twitch account.
+4.  **Copy Token:** Copy the **Access Token**.
+5.  **Configure:** Paste this token into your `client/config.json` under `"twitch_oauth_token"`. 
+    *> **Note:** Ensure the token is prefixed with `oauth:`, e.g., `"oauth:your_token_here"`.*
 
 ## 📖 How to Use
 1.  **Connect:** Enter the ESP32's IP address (shown in Serial Monitor) and click "Connect".
