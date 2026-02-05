@@ -16,3 +16,6 @@ client/dist/
 client/*.spec
 client/blacklist.json
 gcli-request-1769908664988.json
+Streaming-fixes.md
+plan_for_server_and_chrome_extensions.md
+nativ-esp32_concept.md
