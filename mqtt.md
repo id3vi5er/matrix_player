@@ -17,17 +17,23 @@ Basispfad: `ledmatrix` (konfigurierbar)
 | :--- | :--- | :--- |
 | `state` | `ON` / `OFF` | Schaltet das Display (Schwarzbild) oder stoppt Rendering. |
 | `brightness` | `0` - `255` | Setzt die Helligkeit global. |
+| `mode` | `Playlist` / `Static` / `HA-Screen` | **NEU** - Wechselt den Display-Modus. |
+| `ha_background` | `/Pfad/Datei.gif` | **NEU** - Setzt Hintergrund für HA-Screen Modus. |
+| `overlay1_text` | `String` | **NEU** - Text für Overlay 1 (leer = versteckt). |
+| `overlay1_x` / `_y` | `0-64` | **NEU** - Position für Overlay 1. |
+| `overlay1_color` | `R,G,B` / JSON | **NEU** - Farbe für Overlay 1. |
+| `overlay1_size` | `1-8` | **NEU** - Schriftgröße für Overlay 1. |
+| `overlay2_...` | ... | **NEU** - Gleiche Parameter für Overlay 2. |
 | `playlist` | `Name` | Wechselt die Playlist (Ordnername). `ALL` für alle. |
-| `file` | `Ordner/Datei.gif` | Spielt eine spezifische Datei ab. Unterstützt Pfade (z.B. `Pokemon/pikachu.gif`). |
+| `file` | `Ordner/Datei.gif` | Spielt eine spezifische Datei ab. |
 | `shuffle` | `ON` / `OFF` | Aktiviert/Deaktiviert Zufallswiedergabe. |
 | `duration` | `ms` | Setzt die Anzeigedauer pro Bild (Loop-Modus). |
 | `text` | `Nachricht` | Zeigt Text sofort an (Laufschrift). |
-| `command` | `json` | Flexibler JSON-Command für komplexe Aktionen (optional). |
 
 ### Senden (Status) - `ledmatrix/status/...`
 | Subtopic | Payload | Beschreibung |
 | :--- | :--- | :--- |
-| `state` | JSON | Zusammenfassung: `{"state":"ON", "brightness":128, "file":"mario.gif", "playlist":"Games"}` |
+| `state` | JSON | Erweitertes JSON: `{"state":"ON", "mode":"HA-Screen", "ha_background":"...", "overlay1_text":"...", ...}` |
 | `availability`| `online`/`offline` | LWT (Last Will and Testament) für HA. |
 
 ## 3. Architektur & Performance

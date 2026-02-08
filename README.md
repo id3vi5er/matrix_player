@@ -68,10 +68,14 @@ A standalone GUI application (`client/twitch_emotes.py`) connects your matrix to
 *   **Setup:** Copy `client/config.json.example` to `client/config.json` and enter your credentials.
 
 ### Home Automation (MQTT)
-*   **Home Assistant Integration:** Fully controllable via MQTT.
-*   **Auto-Discovery:** Automatically creates entities in Home Assistant for brightness, power, and playlist selection.
-*   **Remote Control:** Change playlists, loop specific files, or adjust brightness remotely.
-*   **Status Updates:** Reports current file, playlist, and device status in real-time.
+*   **Home Assistant Integration:** Fully controllable via MQTT. Supports [Auto-Discovery](mqtt.md) for seamless integration.
+*   **Unified Mode System:** Switch between `Playlist` (cycle animations), `Static` (loop single file), and `HA-Screen` modes via MQTT.
+*   **HA-Screen Mode (New!):** Transform your matrix into a flexible terminal for Home Assistant.
+    *   **Compositing:** Combines a GIF background with two real-time text overlays.
+    *   **Dynamic Overlays:** Control text content, position (X/Y), color (RGB), and font size (1-8) individually for each overlay via MQTT topics.
+    *   **Background Control:** Switch background GIFs on the fly while maintaining overlay data.
+*   **Remote Control:** Change playlists, trigger specific files, adjust brightness, or send temporary scrolling messages.
+*   **Detailed Status:** Real-time JSON status updates including current mode, playback state, and all overlay parameters.
 
 ## 🛠 Hardware Setup
 
