@@ -30,13 +30,26 @@ select:
     state_topic: "ledmatrix/status/state"
     command_topic: "ledmatrix/set/playlist"
     value_template: "{{ value_json.playlist }}"
-    # Options will be auto-populated if Discovery is used, 
+    # Options will be auto-populated if Discovery is used,
     # otherwise list your folders here manually:
     options:
       - "ALL"
       - "Pokemon"
       - "Mario"
     icon: "mdi:playlist-play"
+
+  # --- HA-Screen Display Mode Selector ---
+  - name: "Matrix Display Mode"
+    unique_id: "esp32_matrix_display_mode"
+    state_topic: "ledmatrix/status/state"
+    command_topic: "ledmatrix/set/mode"
+    value_template: "{{ value_json.mode }}"
+    options:
+      - "Playlist"
+      - "Static"
+      - "HA-Screen"
+    icon: "mdi:monitor-dashboard"
+    availability_topic: "ledmatrix/status/availability"
 
 switch:
   - name: "Matrix Shuffle"
@@ -68,6 +81,79 @@ number:
     step: 1
     icon: "mdi:format-size"
 
+  # --- HA-Screen Overlay Positions & Sizes ---
+
+  # Overlay 1 Position
+  - name: "Matrix Overlay 1 X Position"
+    unique_id: "esp32_matrix_overlay1_x"
+    command_topic: "ledmatrix/set/overlay1_x"
+    state_topic: "ledmatrix/status/state"
+    value_template: "{{ value_json.overlay1_x | default(0) }}"
+    min: 0
+    max: 64
+    step: 1
+    mode: box
+    icon: "mdi:arrow-left-right"
+    availability_topic: "ledmatrix/status/availability"
+
+  - name: "Matrix Overlay 1 Y Position"
+    unique_id: "esp32_matrix_overlay1_y"
+    command_topic: "ledmatrix/set/overlay1_y"
+    state_topic: "ledmatrix/status/state"
+    value_template: "{{ value_json.overlay1_y | default(0) }}"
+    min: 0
+    max: 64
+    step: 1
+    mode: box
+    icon: "mdi:arrow-up-down"
+    availability_topic: "ledmatrix/status/availability"
+
+  # Overlay 2 Position
+  - name: "Matrix Overlay 2 X Position"
+    unique_id: "esp32_matrix_overlay2_x"
+    command_topic: "ledmatrix/set/overlay2_x"
+    state_topic: "ledmatrix/status/state"
+    value_template: "{{ value_json.overlay2_x | default(0) }}"
+    min: 0
+    max: 64
+    step: 1
+    mode: box
+    icon: "mdi:arrow-left-right"
+    availability_topic: "ledmatrix/status/availability"
+
+  - name: "Matrix Overlay 2 Y Position"
+    unique_id: "esp32_matrix_overlay2_y"
+    command_topic: "ledmatrix/set/overlay2_y"
+    state_topic: "ledmatrix/status/state"
+    value_template: "{{ value_json.overlay2_y | default(0) }}"
+    min: 0
+    max: 64
+    step: 1
+    mode: box
+    icon: "mdi:arrow-up-down"
+    availability_topic: "ledmatrix/status/availability"
+
+  # Overlay Font Sizes
+  - name: "Matrix Overlay 1 Font Size"
+    unique_id: "esp32_matrix_overlay1_size"
+    command_topic: "ledmatrix/set/overlay1_size"
+    min: 1
+    max: 8
+    step: 1
+    mode: box
+    icon: "mdi:format-size"
+    availability_topic: "ledmatrix/status/availability"
+
+  - name: "Matrix Overlay 2 Font Size"
+    unique_id: "esp32_matrix_overlay2_size"
+    command_topic: "ledmatrix/set/overlay2_size"
+    min: 1
+    max: 8
+    step: 1
+    mode: box
+    icon: "mdi:format-size"
+    availability_topic: "ledmatrix/status/availability"
+
 text:
   - name: "Matrix Send Text"
     unique_id: "esp32_matrix_text"
@@ -80,3 +166,45 @@ text:
     command_topic: "ledmatrix/set/file"
     value_template: "{{ value_json.file }}"
     icon: "mdi:file-image"
+
+  # --- HA-Screen Mode Entities ---
+
+  # HA-Screen Background
+  - name: "Matrix HA Background File"
+    unique_id: "esp32_matrix_ha_background"
+    command_topic: "ledmatrix/set/ha_background"
+    state_topic: "ledmatrix/status/state"
+    value_template: "{{ value_json.ha_background | default('') }}"
+    icon: "mdi:image"
+    availability_topic: "ledmatrix/status/availability"
+
+  # Overlay 1 Text
+  - name: "Matrix Overlay 1 Text"
+    unique_id: "esp32_matrix_overlay1_text"
+    command_topic: "ledmatrix/set/overlay1_text"
+    state_topic: "ledmatrix/status/state"
+    value_template: "{{ value_json.overlay1_text | default('') }}"
+    icon: "mdi:text-box"
+    availability_topic: "ledmatrix/status/availability"
+
+  # Overlay 2 Text
+  - name: "Matrix Overlay 2 Text"
+    unique_id: "esp32_matrix_overlay2_text"
+    command_topic: "ledmatrix/set/overlay2_text"
+    state_topic: "ledmatrix/status/state"
+    value_template: "{{ value_json.overlay2_text | default('') }}"
+    icon: "mdi:text-box"
+    availability_topic: "ledmatrix/status/availability"
+
+  # Overlay Colors
+  - name: "Matrix Overlay 1 Color"
+    unique_id: "esp32_matrix_overlay1_color"
+    command_topic: "ledmatrix/set/overlay1_color"
+    icon: "mdi:palette"
+    availability_topic: "ledmatrix/status/availability"
+
+  - name: "Matrix Overlay 2 Color"
+    unique_id: "esp32_matrix_overlay2_color"
+    command_topic: "ledmatrix/set/overlay2_color"
+    icon: "mdi:palette"
+    availability_topic: "ledmatrix/status/availability"

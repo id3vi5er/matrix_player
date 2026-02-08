@@ -110,6 +110,9 @@ void DisplayManager::begin(FileManager* fm) {
     mxconfig.gpio.d = D_PIN; mxconfig.gpio.e = E_PIN;
     mxconfig.gpio.lat = LAT_PIN; mxconfig.gpio.oe = OE_PIN; mxconfig.gpio.clk = CLK_PIN;
     
+    // Enable double buffering to eliminate flickering
+    mxconfig.double_buff = true;
+
     Serial.println("DisplayManager: Allocating DMA object...");
     dma = new MatrixPanel_I2S_DMA(mxconfig);
     
@@ -140,7 +143,19 @@ void DisplayManager::begin(FileManager* fm) {
     if (!netBuffer || !readyBuffer || !drawBuffer) {
         Serial.println("DisplayManager: Failed to allocate internal RAM buffers!");
     }
-    
+
+    // Allocate previous frame buffer for delta decompression
+    prevFrameBuffer = (uint8_t*)heap_caps_malloc(bufSize, MALLOC_CAP_SPIRAM);
+    if (!prevFrameBuffer) {
+        prevFrameBuffer = (uint8_t*)malloc(bufSize);
+    }
+    if (!prevFrameBuffer) {
+        Serial.println("DisplayManager: Failed to allocate prev frame buffer!");
+        compressionEnabled = false;
+    } else {
+        memset(prevFrameBuffer, 0, bufSize);
+    }
+
     Serial.println("DisplayManager: Init GIF Decoder...");
     gif.begin(LITTLE_ENDIAN_PIXELS);
     Serial.println("DisplayManager: Init done.");
@@ -212,23 +227,300 @@ void DisplayManager::setTextSize(uint8_t size) {
     cmdPending = true;
 }
 
+// --- HA-Screen Mode Public Methods ---
+
+void DisplayManager::setMode(const String& mode) {
+    std::lock_guard<std::mutex> lk(cmdMutex);
+    pendingCmd = CMD_SET_MODE;
+    pendingMode = mode;
+    cmdPending = true;
+}
+
+void DisplayManager::setHABackground(const String& path) {
+    std::lock_guard<std::mutex> lk(cmdMutex);
+    pendingCmd = CMD_SET_HA_BACKGROUND;
+    pendingParam = path;
+    cmdPending = true;
+}
+
+void DisplayManager::setOverlayText(uint8_t index, const String& text) {
+    std::lock_guard<std::mutex> lk(cmdMutex);
+    pendingCmd = CMD_SET_OVERLAY_TEXT;
+    pendingOverlayIndex = index;
+    pendingOverlayText = text;
+    cmdPending = true;
+}
+
+void DisplayManager::setOverlayPosition(uint8_t index, int16_t x, int16_t y) {
+    std::lock_guard<std::mutex> lk(cmdMutex);
+    pendingCmd = CMD_SET_OVERLAY_POSITION;
+    pendingOverlayIndex = index;
+    pendingOverlayX = x;
+    pendingOverlayY = y;
+    cmdPending = true;
+}
+
+void DisplayManager::setOverlayColor(uint8_t index, uint16_t color) {
+    std::lock_guard<std::mutex> lk(cmdMutex);
+    pendingCmd = CMD_SET_OVERLAY_COLOR;
+    pendingOverlayIndex = index;
+    pendingOverlayColor = color;
+    cmdPending = true;
+}
+
+void DisplayManager::setOverlaySize(uint8_t index, uint8_t size) {
+    std::lock_guard<std::mutex> lk(cmdMutex);
+    pendingCmd = CMD_SET_OVERLAY_SIZE;
+    pendingOverlayIndex = index;
+    pendingOverlaySize = size;
+    cmdPending = true;
+}
+
 // Handling fragmented WebSocket frames safely
 bool DisplayManager::handleStreamChunk(uint8_t* data, size_t len, size_t index, size_t totalLen) {
     if (!allowIncomingStream || !netBuffer) return false;
-    
+
     size_t bufferSize = PANEL_RES_X * PANEL_RES_Y * 3;
-    if (index + len > bufferSize) return false;
 
-    memcpy(netBuffer + index, data, len);
+    // DEBUG: Log incoming chunk
+    Serial.printf("[STREAM] Chunk: index=%u, len=%u, total=%u, header=0x%02X\n",
+                  index, len, totalLen, index == 0 ? data[0] : 0xFF);
 
-    // Frame complete?
-    if (index + len == totalLen) {
-        // Swap netBuffer and readyBuffer
+    // Handle single-packet compressed frames
+    if (index == 0 && len == totalLen) {
+        Serial.printf("[STREAM] Single-packet path (compressed/delta)\n");
+
+        // Validate checksum (last 4 bytes)
+        if (len < 5) {  // Need at least 1 header + 4 checksum bytes
+            Serial.printf("[STREAM] ERROR: Packet too short for checksum: %u bytes\n", len);
+            return false;
+        }
+
+        // Extract checksum (last 4 bytes, little-endian)
+        uint32_t receivedChecksum = data[len-4] | (data[len-3] << 8) |
+                                     (data[len-2] << 16) | (data[len-1] << 24);
+
+        // Compute checksum of payload (header + compressed data, excluding checksum)
+        uint32_t computedChecksum = 0;
+        for (size_t i = 1; i < len - 4; i++) {  // Skip header byte, exclude checksum
+            computedChecksum += data[i];
+        }
+        computedChecksum &= 0xFFFFFFFF;
+
+        Serial.printf("[STREAM] Checksum: received=0x%08X, computed=0x%08X\n",
+                      receivedChecksum, computedChecksum);
+
+        if (receivedChecksum != computedChecksum) {
+            Serial.printf("[STREAM] ERROR: Checksum mismatch!\n");
+            return false;
+        }
+
+        // Decompress (without checksum bytes)
+        if (decompressFrame(data, len - 4, netBuffer, bufferSize)) {
+            Serial.printf("[STREAM] Decompression successful\n");
+            // Swap buffers
+            std::lock_guard<std::mutex> lk(streamMutex);
+            std::swap(netBuffer, readyBuffer);
+            newFrameAvailable = true;
+            return true; // Send ACK
+        }
+        Serial.printf("[STREAM] Decompression FAILED\n");
+        return false;
+    }
+
+    // Handle fragmented packets (ONLY for uncompressed Raw Full Frames)
+    Serial.printf("[STREAM] Fragmented path\n");
+    size_t writeIndex = index;
+    size_t expectedTotal = totalLen;
+
+    if (index == 0) {
+        if (len < 1) return false;
+
+        uint8_t header = data[0];
+
+        // Check if this is a multi-fragment packet
+        if (len < totalLen) {
+            // First fragment: validate and skip header
+            Serial.printf("[STREAM] First fragment: header=0x%02X, len=%u, total=%u\n",
+                          header, len, totalLen);
+            if (header != 0x20) {
+                Serial.printf("[STREAM] ERROR: Fragmented compressed frame rejected (header=0x%02X)\n", header);
+                return false;
+            }
+            data++;
+            len--;
+            expectedTotal--;  // Adjust expected total
+            Serial.printf("[STREAM] After header skip: writeIndex=%u, len=%u, expectedTotal=%u\n",
+                          writeIndex, len, expectedTotal);
+        } else {
+            // Single unfragmented packet should use decompression path
+            Serial.printf("[STREAM] ERROR: Single-packet in fragmented path (header=0x%02X)\n", header);
+            return false;
+        }
+    } else {
+        // Subsequent fragments: adjust index because first fragment skipped header
+        writeIndex = index - 1;
+        expectedTotal--;  // Account for skipped header
+        Serial.printf("[STREAM] Subsequent fragment: index=%u → writeIndex=%u, len=%u, expectedTotal=%u\n",
+                      index, writeIndex, len, expectedTotal);
+    }
+
+    if (writeIndex + len > bufferSize) {
+        Serial.printf("[STREAM] ERROR: Buffer overflow: writeIndex=%u + len=%u > bufferSize=%u\n",
+                      writeIndex, len, bufferSize);
+        return false;
+    }
+
+    memcpy(netBuffer + writeIndex, data, len);
+    Serial.printf("[STREAM] Copied %u bytes to position %u\n", len, writeIndex);
+
+    if (writeIndex + len == expectedTotal) {
+        Serial.printf("[STREAM] Frame complete! Total written: %u bytes (expected %u)\n",
+                      writeIndex + len, expectedTotal);
+
+        // Validate checksum for fragmented packets
+        // Checksum is the last 4 bytes of the assembled frame
+        if (expectedTotal < 4) {
+            Serial.printf("[STREAM] ERROR: Frame too short for checksum\n");
+            return false;
+        }
+
+        uint32_t receivedChecksum = netBuffer[expectedTotal-4] | (netBuffer[expectedTotal-3] << 8) |
+                                     (netBuffer[expectedTotal-2] << 16) | (netBuffer[expectedTotal-1] << 24);
+
+        uint32_t computedChecksum = 0;
+        for (size_t i = 0; i < expectedTotal - 4; i++) {
+            computedChecksum += netBuffer[i];
+        }
+        computedChecksum &= 0xFFFFFFFF;
+
+        Serial.printf("[STREAM] Fragmented checksum: received=0x%08X, computed=0x%08X\n",
+                      receivedChecksum, computedChecksum);
+
+        if (receivedChecksum != computedChecksum) {
+            Serial.printf("[STREAM] ERROR: Fragmented checksum mismatch!\n");
+            return false;
+        }
+
+        Serial.printf("[STREAM] Fragmented checksum OK\n");
         std::lock_guard<std::mutex> lk(streamMutex);
         std::swap(netBuffer, readyBuffer);
         newFrameAvailable = true;
-        return true; // Notify caller to send ACK
+        return true; // Send ACK
     }
+
+    Serial.printf("[STREAM] Waiting for more fragments: %u/%u bytes\n",
+                  writeIndex + len, expectedTotal);
+    return false;
+}
+
+// --- Decompression Functions ---
+
+bool DisplayManager::decompressFrame(uint8_t* compressedData, size_t compressedLen,
+                                      uint8_t* outputBuffer, size_t outputSize) {
+    if (compressedLen == 0) return false;
+
+    uint8_t header = compressedData[0];
+    uint8_t version = (header >> 6) & 0x03;
+    uint8_t frameType = (header >> 5) & 0x01;  // Bit 5: 0=Delta, 1=Full
+    uint8_t hasRLE = (header >> 4) & 0x01;     // Bit 4: 0=Raw, 1=RLE
+
+    if (version != 0) {
+        Serial.printf("Unsupported compression version: %d\n", version);
+        return false;
+    }
+
+    if (frameType == 0) {
+        // Delta frame
+        return decompressDeltaFrame(compressedData + 1, compressedLen - 1,
+                                     outputBuffer, outputSize);
+    } else {
+        // Full frame
+        if (hasRLE) {
+            return decompressRLEFrame(compressedData + 1, compressedLen - 1,
+                                       outputBuffer, outputSize);
+        } else {
+            // Raw frame
+            if (compressedLen - 1 == outputSize) {
+                memcpy(outputBuffer, compressedData + 1, outputSize);
+                memcpy(prevFrameBuffer, outputBuffer, outputSize);
+                return true;
+            }
+            return false;
+        }
+    }
+}
+
+bool DisplayManager::decompressDeltaFrame(uint8_t* data, size_t len,
+                                           uint8_t* output, size_t outputSize) {
+    if (!prevFrameBuffer) return false;
+    if (len < 2) return false;
+
+    // Copy previous frame as base
+    memcpy(output, prevFrameBuffer, outputSize);
+
+    // Read change count
+    uint16_t changeCount = data[0] | (data[1] << 8);
+    size_t idx = 2;
+
+    // Apply changes
+    for (uint16_t i = 0; i < changeCount; i++) {
+        if (idx + 5 > len) return false;
+
+        uint16_t pos = data[idx] | (data[idx+1] << 8);
+        uint8_t y = (pos >> 8) & 0xFF;
+        uint8_t x = pos & 0xFF;
+
+        if (x >= PANEL_RES_X || y >= PANEL_RES_Y) continue;
+
+        size_t pixelIdx = (y * PANEL_RES_X + x) * 3;
+        output[pixelIdx] = data[idx+2];     // R
+        output[pixelIdx+1] = data[idx+3];   // G
+        output[pixelIdx+2] = data[idx+4];   // B
+
+        idx += 5;
+    }
+
+    // Update previous frame
+    memcpy(prevFrameBuffer, output, outputSize);
+    return true;
+}
+
+bool DisplayManager::decompressRLEFrame(uint8_t* data, size_t len,
+                                         uint8_t* output, size_t outputSize) {
+    size_t inIdx = 0;
+    size_t outIdx = 0;
+
+    while (inIdx < len && outIdx < outputSize) {
+        if (inIdx + 4 > len) break;
+
+        uint8_t runLength = data[inIdx++];
+        uint8_t r = data[inIdx++];
+        uint8_t g = data[inIdx++];
+        uint8_t b = data[inIdx++];
+
+        // Check if we have space for the ENTIRE run before writing
+        if (outIdx + (runLength * 3) > outputSize) {
+            Serial.printf("RLE overflow: outIdx=%d, runLength=%d, outputSize=%d\n",
+                          outIdx, runLength, outputSize);
+            return false;  // Abort - data is corrupt or buffer too small
+        }
+
+        // Write all pixels of this run
+        for (uint8_t i = 0; i < runLength; i++) {
+            output[outIdx++] = r;
+            output[outIdx++] = g;
+            output[outIdx++] = b;
+        }
+    }
+
+    if (outIdx == outputSize) {
+        // Update previous frame for future deltas
+        memcpy(prevFrameBuffer, output, outputSize);
+        return true;
+    }
+
+    Serial.printf("RLE incomplete: outIdx=%d, expected=%d\n", outIdx, outputSize);
     return false;
 }
 
@@ -329,6 +621,7 @@ void DisplayManager::_playFile(const String& path) {
         if(Serial) Serial.printf("Playing RAM: %s (%d bytes)\n", path.c_str(), len);
         
         dma->clearScreen();
+        dma->flipDMABuffer();
         int tDelay = 0;
         if (gif.playFrame(false, &tDelay)) {
              if (tDelay < 1) tDelay = 1;
@@ -418,6 +711,7 @@ void DisplayManager::_stop() {
     isStreaming = false;
     isPlaying = false;
     isTextMode = false;
+    isHAScreenMode = false;  // Clear HA-Screen mode
     gif.close();
     freeGifData();
     dma->clearScreen();
@@ -497,6 +791,94 @@ void DisplayManager::loadNextInPlaylist() {
     loadNextInPlaylist(); // Recursive retry
 }
 
+// --- HA-Screen Mode Private Implementation ---
+
+void DisplayManager::_setMode(const String& mode) {
+    Serial.printf("DisplayManager: Setting mode to '%s'\n", mode.c_str());
+
+    if (mode == "Playlist") {
+        isHAScreenMode = false;  // Clear HA-Screen mode
+        _playAll();
+    }
+    else if (mode == "Static") {
+        isHAScreenMode = false;  // Clear HA-Screen mode
+        // Play current file in single mode
+        if (currentFile != "") {
+            _playFile(currentFile);
+        } else {
+            Serial.println("DisplayManager: No file set for Static mode");
+        }
+    }
+    else if (mode == "HA-Screen") {
+        _startHAScreen(haScreenBackgroundFile);
+    }
+}
+
+void DisplayManager::_startHAScreen(const String& backgroundPath) {
+    Serial.printf("DisplayManager: Starting HA-Screen mode with background '%s'\n", backgroundPath.c_str());
+
+    // Save current state if not already in HA-Screen mode
+    if (!isHAScreenMode) {
+        savedIsPlaying = isPlaying;
+        savedSingleMode = singleMode;
+        savedCurrentFile = currentFile;
+        savedCurrentPlaylist = currentPlaylist;
+    }
+
+    // Clear other modes
+    _stop();
+    isHAScreenMode = true;
+
+    // Initialize overlays with defaults if not already set
+    for (int i = 0; i < 2; i++) {
+        if (overlays[i].color == 0) overlays[i].color = HA_SCREEN_DEFAULT_COLOR;
+        if (overlays[i].size == 0) overlays[i].size = HA_SCREEN_DEFAULT_SIZE;
+        overlays[i].enabled = (overlays[i].text != "");
+    }
+
+    // Save background file
+    haScreenBackgroundFile = backgroundPath;
+
+    // Validate file exists
+    if (backgroundPath == "") {
+        Serial.println("HA-Screen: No background file specified");
+        dma->clearScreen();
+        return;
+    }
+
+    if (!LittleFS.exists(backgroundPath)) {
+        Serial.printf("HA-Screen: Background file not found: %s\n", backgroundPath.c_str());
+        dma->clearScreen();
+        return;
+    }
+
+    // Start GIF playback of background
+    Serial.printf("HA-Screen: Loading background GIF: %s\n", backgroundPath.c_str());
+    _playFile(backgroundPath);
+}
+
+void DisplayManager::_drawOverlays() {
+    if (!dma) return;
+
+    for (int i = 0; i < 2; i++) {
+        if (!overlays[i].enabled || overlays[i].text == "") continue;
+
+        // Clamp position to display bounds
+        int16_t x = constrain(overlays[i].x, 0, PANEL_RES_X - 1);
+        int16_t y = constrain(overlays[i].y, 0, PANEL_RES_Y - 1);
+
+        // Set text properties
+        dma->setFont(NULL);  // Explicitly use default 5x7 font
+        dma->setTextSize(overlays[i].size);
+        dma->setTextColor(overlays[i].color);
+        dma->setTextWrap(false);
+
+        // Draw text
+        dma->setCursor(x, y);
+        dma->print(overlays[i].text);
+    }
+}
+
 void DisplayManager::_showText(const String& text, bool scroll) {
     if (text == "") {
         // --- Restore Previous State ---
@@ -573,6 +955,7 @@ void DisplayManager::_showText(const String& text, bool scroll) {
         // Center vertically: (64 - 8) / 2 = 28
         dma->setCursor(textX, (PANEL_RES_Y - 7) / 2);
         dma->print(textMessage);
+        dma->flipDMABuffer();
     }
 }
 
@@ -622,7 +1005,16 @@ void DisplayManager::loop() {
     int intToExec = 0;
     bool boolToExec = false;
     uint8_t rExec, gExec, bExec;
-    
+
+    // HA-Screen command variables
+    String modeExec;
+    int overlayIndexExec = 0;
+    String overlayTextExec;
+    int overlayXExec = -1;
+    int overlayYExec = -1;
+    uint16_t overlayColorExec = 0xFFFF;
+    uint8_t overlaySizeExec = 1;
+
     {
         std::lock_guard<std::mutex> lk(cmdMutex);
         if (cmdPending) {
@@ -632,16 +1024,32 @@ void DisplayManager::loop() {
             intToExec = pendingInt;
             boolToExec = pendingBool;
             rExec = pendingR; gExec = pendingG; bExec = pendingB;
+
+            // Copy HA-Screen command parameters
+            modeExec = pendingMode;
+            overlayIndexExec = pendingOverlayIndex;
+            overlayTextExec = pendingOverlayText;
+            overlayXExec = pendingOverlayX;
+            overlayYExec = pendingOverlayY;
+            overlayColorExec = pendingOverlayColor;
+            overlaySizeExec = pendingOverlaySize;
+
             cmdPending = false;
-            pendingCmd = CMD_NONE; 
+            pendingCmd = CMD_NONE;
         }
     }
 
     // 2. Execute command
     if (cmdToExec != CMD_NONE) {
         switch (cmdToExec) {
-            case CMD_PLAY_SINGLE: _playFile(paramToExec); break;
-            case CMD_PLAY_ALL:    _playAll(paramToExec); break;
+            case CMD_PLAY_SINGLE: 
+                isHAScreenMode = false;
+                _playFile(paramToExec); 
+                break;
+            case CMD_PLAY_ALL:    
+                isHAScreenMode = false;
+                _playAll(paramToExec); 
+                break;
             case CMD_STOP:        _stop(); break;
             case CMD_SET_DURATION: 
                 loopDurationMs = valToExec; 
@@ -679,6 +1087,55 @@ void DisplayManager::loop() {
                 textSize = (uint8_t)intToExec;
                 if (textSize < 1) textSize = 1;
                 break;
+
+            // HA-Screen Mode Commands
+            case CMD_SET_MODE:
+                _setMode(modeExec);
+                break;
+
+            case CMD_SET_HA_BACKGROUND:
+                if (isHAScreenMode) {
+                    _startHAScreen(paramToExec);  // Reload with new background
+                } else {
+                    haScreenBackgroundFile = paramToExec;  // Just save for later
+                }
+                break;
+
+            case CMD_SET_OVERLAY_TEXT:
+                if (overlayIndexExec < 2) {
+                    overlays[overlayIndexExec].text = overlayTextExec;
+                    overlays[overlayIndexExec].enabled = (overlayTextExec != "");
+                    if (Serial) Serial.printf("Set overlay %d text='%s' enabled=%d\n",
+                        overlayIndexExec, overlayTextExec.c_str(), overlays[overlayIndexExec].enabled);
+                }
+                break;
+
+            case CMD_SET_OVERLAY_POSITION:
+                if (overlayIndexExec < 2) {
+                    if (overlayXExec >= 0) overlays[overlayIndexExec].x = overlayXExec;
+                    if (overlayYExec >= 0) overlays[overlayIndexExec].y = overlayYExec;
+                    if (Serial) Serial.printf("Set overlay %d pos=(%d,%d)\n",
+                        overlayIndexExec, overlays[overlayIndexExec].x, overlays[overlayIndexExec].y);
+                }
+                break;
+
+            case CMD_SET_OVERLAY_COLOR:
+                if (overlayIndexExec < 2) {
+                    overlays[overlayIndexExec].color = overlayColorExec;
+                    if (Serial) Serial.printf("Set overlay %d color=0x%04X\n",
+                        overlayIndexExec, overlayColorExec);
+                }
+                break;
+
+            case CMD_SET_OVERLAY_SIZE:
+                if (overlayIndexExec < 2) {
+                    overlays[overlayIndexExec].size = overlaySizeExec;
+                    if (overlays[overlayIndexExec].size < 1) overlays[overlayIndexExec].size = 1;
+                    if (Serial) Serial.printf("Set overlay %d size=%d\n",
+                        overlayIndexExec, overlays[overlayIndexExec].size);
+                }
+                break;
+
             default: break;
         }
     }
@@ -708,6 +1165,7 @@ void DisplayManager::loop() {
                     dma->drawPixelRGB888(x, y, r, g, b);
                 }
             }
+            dma->flipDMABuffer();
         }
         yield();
     }
@@ -726,6 +1184,7 @@ void DisplayManager::loop() {
             dma->setTextColor(textColor);
             dma->setCursor(textX, (PANEL_RES_Y - 7) / 2);
             dma->print(textMessage);
+            dma->flipDMABuffer();
         }
         yield();
     }
@@ -756,7 +1215,47 @@ void DisplayManager::loop() {
         if (barFillWidth > 0) {
             dma->fillRect(4, barY, barFillWidth, barHeight, dma->color565(0, 255, 0));
         }
+        dma->flipDMABuffer();
 
+        yield();
+    }
+    else if (isHAScreenMode) {
+        if (isPlaying) {
+            if (millis() >= nextGifFrameTime) {
+                std::lock_guard<std::mutex> gifLk(gifMutex);
+                if (!isPlaying) return;
+
+                int tDelay = 0;
+                int result = gif.playFrame(false, &tDelay);
+
+                if (result == 1) {
+                    if (tDelay < 1) tDelay = 1;
+                    nextGifFrameTime = millis() + tDelay;
+                }
+                else if (result == 0) {
+                    gif.reset();
+                    gif.playFrame(false, &tDelay);
+                    if (tDelay < 1) tDelay = 1;
+                    nextGifFrameTime = millis() + tDelay;
+                }
+                else {
+                    gif.reset();
+                    nextGifFrameTime = millis() + 1000;
+                    if (Serial) Serial.printf("HA-Screen GIF Error: %d\n", gif.getLastError());
+                }
+                _drawOverlays();
+                dma->flipDMABuffer();
+            }
+        } else {
+            // No background GIF. Just draw overlays on black.
+            static unsigned long lastStaticDraw = 0;
+            if (millis() - lastStaticDraw > 100) {
+                dma->clearScreen();
+                _drawOverlays();
+                dma->flipDMABuffer();
+                lastStaticDraw = millis();
+            }
+        }
         yield();
     }
     else if (isPlaying && !isStreaming) {
@@ -771,6 +1270,7 @@ void DisplayManager::loop() {
                 // Frame decoded
                 if (tDelay < 1) tDelay = 1; // Minimum 1ms
                 nextGifFrameTime = millis() + tDelay;
+                dma->flipDMABuffer();
             } 
             else if (result == 0) { 
                 // End of animation reached
@@ -783,12 +1283,13 @@ void DisplayManager::loop() {
                     loopDurationMs = 10000;
                 }
 
-                if(Serial) Serial.printf("GIF End: elapsed=%lu / %lu ms. Single: %d\n", elapsed, loopDurationMs, singleMode);
+                // if(Serial) Serial.printf("GIF End: elapsed=%lu / %lu ms. Single: %d\n", elapsed, loopDurationMs, singleMode);
 
                 if (singleMode || (elapsed < loopDurationMs)) {
                     // Loop again
                     gif.reset();
                     nextGifFrameTime = millis() + 1;
+                    if (dma) dma->flipDMABuffer();
                 } else {
                     // Time is up, next GIF
                     if(Serial) Serial.println("Time up. Next GIF.");

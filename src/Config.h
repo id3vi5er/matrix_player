@@ -33,6 +33,11 @@
 #define DEFAULT_PLAYLIST "Default" // "ALL" for everything, or folder name e.g. "Party"
 #define DEFAULT_FONT_SIZE 1 // 1 = 5x7 px, 2 = 10x14 px, etc.
 
+// --- HA-Screen Mode Defaults ---
+#define HA_SCREEN_MAX_OVERLAYS 2
+#define HA_SCREEN_DEFAULT_COLOR 0xFFFF  // White (RGB565)
+#define HA_SCREEN_DEFAULT_SIZE 1        // Font size
+
 // --- MQTT Settings ---
 #define MQTT_TOPIC_PREFIX "ledmatrix"
 #define MQTT_RECONNECT_INTERVAL 5000

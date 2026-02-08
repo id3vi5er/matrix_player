@@ -43,7 +43,24 @@ private:
     String topicSetText;
     String topicSetTextColor;
     String topicSetFontSize;
-    
+
+    // HA-Screen Mode Topics
+    String topicSetMode;
+    String topicSetHABackground;
+    String topicSetOverlay1Text;
+    String topicSetOverlay1X;
+    String topicSetOverlay1Y;
+    String topicSetOverlay1Color;
+    String topicSetOverlay1Size;
+    String topicSetOverlay2Text;
+    String topicSetOverlay2X;
+    String topicSetOverlay2Y;
+    String topicSetOverlay2Color;
+    String topicSetOverlay2Size;
+
     String topicStatusState;
     String topicStatusAvailability;
+
+    // Helper methods
+    uint16_t parseColorToRGB565(const String& msg);
 };

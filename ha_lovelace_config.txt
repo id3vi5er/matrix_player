@@ -1,0 +1,58 @@
+type: vertical-stack
+cards:
+  - type: entities
+    title: 🖥️ Matrix Modus & Hintergrund
+    show_header_toggle: false
+    entities:
+      - entity: select.matrix_display_mode
+        name: Anzeige-Modus
+      - entity: light.matrix_display
+        name: Helligkeit & Status
+      - entity: text.matrix_ha_background_file
+        name: Hintergrund-Datei (.gif)
+        icon: mdi:image-frame
+
+  - type: entities
+    title: 🏷️ Overlay 1 (Oben/Text)
+    show_header_toggle: false
+    entities:
+      - entity: text.matrix_overlay_1_text
+        name: Text Inhalt
+      - entity: text.matrix_overlay_1_color
+        name: Text Farbe (R,G,B)
+      - entity: number.matrix_overlay_1_font_size
+        name: Schriftgröße
+      - type: section
+        label: Positionierung
+      - entity: number.matrix_overlay_1_x_position
+        name: X-Position
+      - entity: number.matrix_overlay_1_y_position
+        name: Y-Position
+
+  - type: entities
+    title: 🏷️ Overlay 2 (Unten/Zusatz)
+    show_header_toggle: false
+    entities:
+      - entity: text.matrix_overlay_2_text
+        name: Text Inhalt
+      - entity: text.matrix_overlay_2_color
+        name: Text Farbe (R,G,B)
+      - entity: number.matrix_overlay_2_font_size
+        name: Schriftgröße
+      - type: section
+        label: Positionierung
+      - entity: number.matrix_overlay_2_x_position
+        name: X-Position
+      - entity: number.matrix_overlay_2_y_position
+        name: Y-Position
+
+  - type: entities
+    title: ⚙️ Erweiterte Einstellungen
+    show_header_toggle: false
+    entities:
+      - entity: number.matrix_loop_duration
+        name: Loop Dauer (ms)
+      - entity: switch.matrix_shuffle
+        name: Zufallswiedergabe
+      - entity: select.matrix_playlist
+        name: Aktive Playlist
